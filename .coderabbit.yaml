@@ -1,0 +1,49 @@
+language: en-US
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - dev
+  path_filters:
+    - "!Docs/**"
+    - "!screen/**"
+    - "!**/*.docx"
+    - "!**/*.jpeg"
+    - "!**/*.jpg"
+    - "!**/*.png"
+    - "!**/package-lock.json"
+  path_instructions:
+    - path: "backend/**"
+      instructions: >
+        Node/Express + Supabase (Postgres) backend, CommonJS, no TypeScript.
+        Every consumer route must scope data access by the authenticated
+        user_id (see db.js's fetchAll/makeEntityHelpers pattern); every admin
+        route must go through requireAdminAuth + requirePermission (see
+        middleware/adminAuth.js). Flag: missing ownership checks, any
+        secret/key that could leak to the client bundle, missing server-side
+        input validation, and new Supabase tables created with RLS policies
+        instead of the existing "RLS enabled, no policies, service-role only"
+        convention used throughout backend/supabase/migrations/.
+    - path: "frontend/**"
+      instructions: >
+        Consumer app: React 18 + Vite + Tailwind, plain JavaScript (no
+        TypeScript, no MUI here by design). Flag any direct supabase-js
+        `.from(...)` table calls in components (all data access should go
+        through frontend/src/lib/api.js) and any new UI primitive that
+        duplicates something already in frontend/src/components/ui/.
+    - path: "admin/**"
+      instructions: >
+        Separate admin app: React 18 + Vite + MUI, distinct from the
+        consumer app's Tailwind stack. Flag any admin UI action that isn't
+        gated by a matching server-side requirePermission/isSuperAdmin check.
+
+chat:
+  auto_reply: true
