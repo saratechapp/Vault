@@ -1478,6 +1478,18 @@ app.use((err, req, res, next) => {
 // their own data instead (see requireAuth above). Simplest option that
 // matches the new per-request-scoped design.
 
-app.listen(PORT, () => {
-  console.log(`Wallet backend running on http://localhost:${PORT}`);
-});
+// Guarded so this file can be `require()`'d (e.g. from unit tests importing
+// the pure helpers below) without also binding a port / needing live
+// Supabase env vars — only actually listens when run directly (`node
+// server.js` / `npm start` / nodemon), which is the only real invocation
+// path today.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Wallet backend running on http://localhost:${PORT}`);
+  });
+}
+
+// Test-only surface: a handful of small pure helpers worth unit testing
+// directly rather than only indirectly through route behavior. Not used by
+// any other module — server.js has no other consumer.
+module.exports = { ownsAccount, foreignAccountField, decodeJwtIssuedAt };

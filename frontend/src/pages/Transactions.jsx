@@ -23,7 +23,7 @@ function accMeta(accounts, id) {
 // statement-style previous/current balance. `transactions` comes back from
 // the API sorted recent-first (date desc, insertion-order desc on ties), so
 // reversing it recovers the true chronological order money actually moved in.
-function buildBalanceLedger(transactions, accounts) {
+export function buildBalanceLedger(transactions, accounts) {
   const running = new Map(accounts.map((a) => [a.id, a.openingBalance]));
   const chronological = [...transactions].reverse();
   const ledger = new Map();
@@ -51,7 +51,7 @@ function buildBalanceLedger(transactions, accounts) {
 
 // Picks which side of a transfer to report balances for: the filtered
 // account when one is selected, otherwise the paying (from) account.
-function statementFor(t, ledger, contextAccountId) {
+export function statementFor(t, ledger, contextAccountId) {
   const entry = ledger.get(t.id);
   if (!entry) return { previousBalance: null, currentBalance: null, displayAmount: t.amount };
   if (t.type === 'transfer') {

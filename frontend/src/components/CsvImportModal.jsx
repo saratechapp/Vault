@@ -26,11 +26,11 @@ const HEADER_DICT = {
   note: ['note', 'notes', 'memo'],
 };
 
-function normalize(h) {
+export function normalize(h) {
   return h.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function guessMapping(headers) {
+export function guessMapping(headers) {
   const mapping = {};
   const normalized = headers.map(normalize);
   Object.entries(HEADER_DICT).forEach(([field, candidates]) => {

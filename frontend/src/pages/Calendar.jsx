@@ -13,30 +13,30 @@ const TYPE_META = {
   transfer: { label: 'Transfer', tone: 'info' },
 };
 
-function pad2(n) {
+export function pad2(n) {
   return String(n).padStart(2, '0');
 }
-function dateKey(d) {
+export function dateKey(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
-function keyToDate(key) {
+export function keyToDate(key) {
   const [y, m, d] = key.split('-').map(Number);
   return new Date(y, m - 1, d);
 }
-function addDays(d, n) {
+export function addDays(d, n) {
   const r = new Date(d);
   r.setDate(r.getDate() + n);
   return r;
 }
-function addMonths(d, n) {
+export function addMonths(d, n) {
   return new Date(d.getFullYear(), d.getMonth() + n, 1);
 }
-function startOfWeek(d) {
+export function startOfWeek(d) {
   const r = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   r.setDate(r.getDate() - r.getDay());
   return r;
 }
-function buildMonthGrid(focusDate) {
+export function buildMonthGrid(focusDate) {
   const year = focusDate.getFullYear();
   const month = focusDate.getMonth();
   const firstOfMonth = new Date(year, month, 1);
@@ -49,14 +49,14 @@ function buildMonthGrid(focusDate) {
     return { date: d, key: dateKey(d), inMonth: d.getMonth() === month };
   });
 }
-function buildWeekGrid(focusDate) {
+export function buildWeekGrid(focusDate) {
   const start = startOfWeek(focusDate);
   return Array.from({ length: 7 }, (_, i) => {
     const d = addDays(start, i);
     return { date: d, key: dateKey(d) };
   });
 }
-function weekLabel(weekCells) {
+export function weekLabel(weekCells) {
   const start = weekCells[0].date;
   const end = weekCells[6].date;
   const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
@@ -66,7 +66,7 @@ function weekLabel(weekCells) {
     : end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   return `${startStr} – ${endStr}`;
 }
-function summarize(list) {
+export function summarize(list) {
   let income = 0, expense = 0, transfer = 0;
   list.forEach((t) => {
     if (t.type === 'income') income += t.amount;

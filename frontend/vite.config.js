@@ -24,6 +24,15 @@ function redirectBareSuperadmin() {
 
 export default defineConfig({
   plugins: [react(), redirectBareSuperadmin()],
+  test: {
+    environment: 'jsdom',
+    globals: false,
+    setupFiles: ['./src/test/setup.js'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+    },
+  },
   server: {
     port: 5173,
     proxy: {

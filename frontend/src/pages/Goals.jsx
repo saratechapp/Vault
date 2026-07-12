@@ -26,7 +26,7 @@ const GOAL_COLORS = ['#6366f1', '#22d3ee', '#a855f7', '#ec4899', '#84cc16', '#f5
 
 // Dec 31 of the current year — filled in on-demand by the "This year end"
 // quick-pick chip next to the Deadline field, not as a silent default.
-function endOfThisYearIso() {
+export function endOfThisYearIso() {
   return `${new Date().getFullYear()}-12-31`;
 }
 
@@ -34,7 +34,7 @@ function blankForm() {
   return { name: '', target: '', saved: '', deadline: '', priority: 'medium', monthlyContribution: '', note: '', color: GOAL_COLORS[0] };
 }
 
-function monthsUntil(dateStr) {
+export function monthsUntil(dateStr) {
   if (!dateStr) return 1;
   const now = new Date();
   const then = new Date(dateStr);

@@ -128,7 +128,7 @@ function PaymentModal({ open, onClose, debt, accounts, onPaid }) {
   );
 }
 
-function simulate(debts, extraMonthly, strategy) {
+export function simulate(debts, extraMonthly, strategy) {
   let working = debts.map((d) => ({ ...d }));
   const timeline = [];
   let month = 0;

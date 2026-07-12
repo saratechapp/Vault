@@ -25,7 +25,10 @@ export function previousMonth({ year, month }) {
 export function monthRange(year, month) {
   const from = new Date(year, month, 1);
   const to = new Date(year, month + 1, 0);
-  const iso = (d) => d.toISOString().slice(0, 10);
+  // Local calendar date, not toISOString() (UTC) — from/to are built from
+  // local Date getters, so formatting them in UTC can shift the string a day
+  // in either direction depending on the local timezone offset.
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return { dateFrom: iso(from), dateTo: iso(to) };
 }
 

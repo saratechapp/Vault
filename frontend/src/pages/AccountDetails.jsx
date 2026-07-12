@@ -23,7 +23,7 @@ function isInflowForAccount(t, accountId) {
 // in (here: only the ones touching this account). Mirrors the backend's
 // computeCategories ledger — every transaction's magnitude adds to the total,
 // so "Available Amount" always reflects Previous Total + Latest Transaction.
-function ledgerForIds(transactions, idSet, accountId) {
+export function ledgerForIds(transactions, idSet, accountId) {
   const rows = transactions.filter((t) => idSet.has(t.categoryId));
   if (rows.length === 0) return null;
   const sorted = [...rows].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -45,7 +45,7 @@ function ledgerForIds(transactions, idSet, accountId) {
 // Medical apart from Electricity apart from Upskilling. Since vendor name is
 // the one thing that still distinguishes them, break the Transfer bucket
 // down by vendor instead of leaving it as a single flat number.
-function buildAccountCategoryLedger(transactions, categories, accountId) {
+export function buildAccountCategoryLedger(transactions, categories, accountId) {
   const parents = categories.filter((c) => !c.parentId);
   return parents
     .map((parent) => {
