@@ -1,0 +1,34 @@
+// Design tokens for hand-authored SCSS (MUI's own components are themed
+// separately via theme.js — these are for the bits of chrome MUI doesn't
+// cover, e.g. AdminShell's layout, chart wrappers). Kept in sync with
+// theme.js by hand; there are few enough tokens that a build-time bridge
+// isn't worth the complexity yet.
+:root {
+  --admin-bg: #f6f5fa;
+  --admin-surface: #ffffff;
+  --admin-surface-2: #f1f0f7;
+  --admin-border: #e3e1ee;
+  --admin-text: #17151f;
+  --admin-text-muted: #625f74;
+  --admin-text-subtle: #93909f;
+  --admin-brand: #7f3aef;
+  --admin-brand-strong: #651fd6;
+  --admin-success: #16a34a;
+  --admin-warning: #d97706;
+  --admin-danger: #dc2626;
+}
+
+:root.dark {
+  --admin-bg: #0f0e17;
+  --admin-surface: #17151f;
+  --admin-surface-2: #1e1b2b;
+  --admin-border: #2a2738;
+  --admin-text: #f1f0f7;
+  --admin-text-muted: #a39fb8;
+  --admin-text-subtle: #6f6c82;
+  --admin-brand: #9d67f4;
+  --admin-brand-strong: #bf9bf8;
+  --admin-success: #22c55e;
+  --admin-warning: #f59e0b;
+  --admin-danger: #f87171;
+}

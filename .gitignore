@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vite/
+.env
+.env.*
+!.env.example
+backend/.data-key
+backend/sampledata.json
+backend/sampledata.json.tmp
+.DS_Store
