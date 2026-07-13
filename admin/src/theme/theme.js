@@ -43,6 +43,9 @@ export function buildTheme(mode) {
       MuiCard: { styleOverrides: { root: { border: `1px solid ${p.border}`, boxShadow: 'none' } } },
       MuiButton: { styleOverrides: { root: { borderRadius: 8 } } },
       MuiChip: { styleOverrides: { root: { fontWeight: 600 } } },
+      MuiOutlinedInput: {
+        styleOverrides: { root: { backgroundColor: mode === 'dark' ? p.surface2 : '#f6f5fc' } },
+      },
     },
   });
 }
