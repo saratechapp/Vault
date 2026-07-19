@@ -46,6 +46,12 @@ function AccountModal({ open, onClose, editing, onSaved }) {
   async function handleSubmit(e) {
     e.preventDefault();
     if (!form.name.trim()) return setError('Account name is required.');
+    if (!form.type) return setError('Account type is required.');
+    if (form.openingBalance === '' || form.openingBalance === null || Number.isNaN(Number(form.openingBalance))) {
+      return setError('Opening balance is required.');
+    }
+    if (!form.currency) return setError('Currency is required.');
+    if (!form.color) return setError('Color is required.');
     setSubmitting(true);
     try {
       const payload = { ...form, openingBalance: Number(form.openingBalance) || 0 };
@@ -64,10 +70,10 @@ function AccountModal({ open, onClose, editing, onSaved }) {
     <Modal open={open} onClose={onClose} title={editing ? 'Edit account' : 'Add account'} subtitle={editing ? 'Update your account details.' : 'Track a new bank, card, wallet, or cash pile.'} size="md">
       <form onSubmit={handleSubmit} className="space-y-4">
         {error && <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
-        <Field label="Account name">
+        <Field label="Account name" required>
           <Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. HDFC Checking" />
         </Field>
-        <Field label="Type">
+        <Field label="Type" required>
           <div className="grid grid-cols-5 gap-2">
             {TYPES.map((t) => (
               <button
@@ -88,16 +94,16 @@ function AccountModal({ open, onClose, editing, onSaved }) {
           <Input value={form.institution} onChange={(e) => setForm((f) => ({ ...f, institution: e.target.value }))} placeholder="e.g. HDFC Bank" />
         </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Opening balance" hint="Use a negative number for credit card balances.">
+          <Field label="Opening balance" required hint="Use a negative number for credit card balances.">
             <Input type="number" step="0.01" value={form.openingBalance} onChange={(e) => setForm((f) => ({ ...f, openingBalance: e.target.value }))} placeholder="0.00" />
           </Field>
-          <Field label="Currency">
+          <Field label="Currency" required>
             <Select value={form.currency} onChange={(e) => setForm((f) => ({ ...f, currency: e.target.value }))}>
               {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
             </Select>
           </Field>
         </div>
-        <Field label="Color">
+        <Field label="Color" required>
           <div className="flex flex-wrap gap-2">
             {CATEGORY_COLORS.map((c) => (
               <button

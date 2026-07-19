@@ -19,7 +19,7 @@ const {
 } = require('./services/shared');
 const {
   computeLedger, computeAccounts, computeCategories,
-  buildSpendingTrend, buildTagTrend, buildCategorySpend, buildMetrics,
+  buildSpendingTrend, buildTagTrend, buildCategorySpend, buildNetWorthTrend, buildMetrics,
 } = require('./services/metricsService');
 const { gradeFor, computeHealth } = require('./services/healthScoreEngine');
 const { computeBudgetPredictions, computeUnusedBudgets, recommendBudgetAdjustments } = require('./services/budgetAnalysisService');
@@ -149,11 +149,18 @@ function bumpCache(userId) {
 // (set in the Add/Edit bill form's Tags field) rather than replacing them,
 // so a bill tagged "Savings" still shows that tag on the transaction it
 // posts, not just the system tag.
-function buildBillTransaction(bill, { note, extraLabels = [] }) {
+function buildBillTransaction(bill, { note, extraLabels = [], date }) {
   const isTransfer = bill.type === 'transfer';
   const labels = [...new Set([...(bill.labels || []), ...extraLabels])];
   return {
-    date: bill.dueDate,
+    // Auto-post's catch-up run (postBillTransaction, below) intentionally
+    // omits `date` so it keeps dating the transaction at the bill's own
+    // schedule — an auto-pay is meant to have happened on its due date even
+    // if the server only got around to inserting the row later. A manual
+    // "Pay" (the PATCH handler's bill-payment branch) passes the actual
+    // payment timestamp here instead, since that's a one-off action the user
+    // is taking right now, not a scheduled auto-charge.
+    date: date || bill.dueDate,
     vendor: bill.vendor || bill.name,
     categoryId: bill.categoryId || null,
     amount: isTransfer ? Math.abs(numOr(bill.amount)) : signAmount(bill.type, bill.amount),
@@ -1044,9 +1051,9 @@ app.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
     // 0007_bill_payments.sql's comment on why this can't be reconstructed
     // after the fact from the bill's (now-rolled-forward) current due date.
     const dueDateAtPayment = bill.dueDate;
-    postedTxn = await db.insertTransaction(req.userId, buildBillTransaction(bill, { note: bill.note || '', extraLabels: ['bill-payment'] }));
-    req.userData.transactions.push(postedTxn);
     const paidDate = iso(new Date());
+    postedTxn = await db.insertTransaction(req.userId, buildBillTransaction(bill, { note: bill.note || '', extraLabels: ['bill-payment'], date: paidDate }));
+    req.userData.transactions.push(postedTxn);
     if (bill.frequency === 'one-time') {
       bill.active = false;
       patch.active = false;
@@ -1362,7 +1369,8 @@ app.get('/api/reports', requireAuth, requireFeature('canUseAdvancedAnalytics'), 
   // Debts page instead. Category totals above already cover "where did the
   // money go by purpose" separately from "who did it go to."
   const topVendors = computeTopMerchants(req.userData);
-  sendJSON(req, res, { totals, savings, savingsRate, spendingTrend, categorySpend, topVendors });
+  const netWorthTrend = buildNetWorthTrend(req.userData, 12);
+  sendJSON(req, res, { totals, savings, savingsRate, spendingTrend, categorySpend, topVendors, netWorthTrend });
 });
 
 // ---- AI insights (rule-based; no external calls, computed live) ----

@@ -166,6 +166,48 @@ function buildCategorySpend(transactions, categories) {
   return [...map.entries()].map(([categoryId, amount]) => ({ categoryId, amount })).sort((a, b) => b.amount - a.amount);
 }
 
+// Net worth over time — assets reconstructed by replaying each account's
+// ledger up to a month-end cutoff (same contribution rule as computeAccounts),
+// liabilities reconstructed backward from each debt's current balance plus
+// every debt-payment transaction (server.js `/api/debts/:id/payment`, tagged
+// `sourceDebtId` + labels: ['debt-payment']) that happened after the cutoff —
+// debts have no ledger of their own, only a live balance, so this is the only
+// way to know what was still owed at a past point in time.
+function buildNetWorthTrend(userData, months = 12) {
+  const { transactions, accounts = [], debts = [] } = userData;
+  const now = new Date();
+  const buckets = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const cutoff = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59, 999);
+    buckets.push({ month: cutoff.toLocaleDateString('en-US', { month: 'short' }), cutoff });
+  }
+
+  return buckets.map(({ month, cutoff }) => {
+    const assets = accounts.reduce((sum, acc) => {
+      const contributionFn = (t) => {
+        if (t.type === 'transfer') {
+          if (t.fromAccountId === acc.id) return -Math.abs(t.amount);
+          if (t.toAccountId === acc.id) return Math.abs(t.amount);
+          return null;
+        }
+        if (t.accountId === acc.id) return t.amount;
+        return null;
+      };
+      const upToCutoff = transactions.filter((t) => new Date(t.date) <= cutoff);
+      return sum + computeLedger(upToCutoff, acc.openingBalance, contributionFn).balance;
+    }, 0);
+
+    const liabilities = debts.reduce((sum, debt) => {
+      const paymentsAfterCutoff = transactions
+        .filter((t) => t.sourceDebtId === debt.id && new Date(t.date) > cutoff)
+        .reduce((s, t) => s + Math.abs(t.amount), 0);
+      return sum + debt.balance + paymentsAfterCutoff;
+    }, 0);
+
+    return { month, assets, liabilities, netWorth: assets - liabilities };
+  });
+}
+
 function buildMetrics(userData, accounts) {
   const trend = buildSpendingTrend(userData.transactions, 2);
   const [prev, curr] = trend;
@@ -192,6 +234,7 @@ module.exports = {
   buildSpendingTrend,
   buildTagTrend,
   buildCategorySpend,
+  buildNetWorthTrend,
   buildMetrics,
   TAG_TREND_KEYS,
 };

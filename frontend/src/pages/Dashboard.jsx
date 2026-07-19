@@ -83,7 +83,7 @@ function AccountsStrip({ accounts }) {
             Icon={LucideIcons[a.icon] || LucideIcons.Circle}
             title={a.name}
             value={formatCurrency(a.balance)}
-            subtitle={`${(a.type || '').toUpperCase()}${a.institution ? ` · ${a.institution}` : ''}`}
+            subtitle={(a.type || '').toUpperCase()}
             negative={a.balance < 0}
             trend={accountTrend(a.monthNet)}
             pinned={pinned.has(a.id)}
