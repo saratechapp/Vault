@@ -85,10 +85,11 @@ const RULES = [
 ];
 
 export function matchIntent(text) {
-  const lower = (text || '').toLowerCase();
+  const safeText = text || '';
+  const lower = safeText.toLowerCase();
   for (const rule of RULES) {
-    if (rule.test(lower, text)) {
-      return { id: rule.id, args: rule.args ? rule.args(text) : {} };
+    if (rule.test(lower, safeText)) {
+      return { id: rule.id, args: rule.args ? rule.args(safeText) : {} };
     }
   }
   return null;

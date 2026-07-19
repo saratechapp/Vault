@@ -58,7 +58,7 @@ export function IdleLogoutManager() {
         </p>
         <ProgressBar value={secondsLeft} max={WARNING_SECONDS} tone={secondsLeft <= 15 ? 'danger' : 'warning'} className="w-full" />
         <div className="grid w-full grid-cols-2 gap-3">
-          <Button variant="outline" onClick={logout}>Sign out now</Button>
+          <Button variant="outline" onClick={() => logout()}>Sign out now</Button>
           <Button onClick={() => setWarning(false)}>Stay signed in</Button>
         </div>
       </div>

@@ -106,10 +106,10 @@ export function Select({ className = '', children, value, onChange, disabled, pl
   );
 }
 
-export function Field({ label, hint, error, children, className = '' }) {
+export function Field({ label, hint, error, required, children, className = '' }) {
   return (
     <div className={className}>
-      {label && <label className="label">{label}</label>}
+      {label && <label className="label">{label}{required && <span className="ml-0.5 text-rose-500">*</span>}</label>}
       {children}
       {error ? <p className="mt-1 text-xs text-rose-500">{error}</p> : hint ? <p className="mt-1 text-xs text-subtle">{hint}</p> : null}
     </div>

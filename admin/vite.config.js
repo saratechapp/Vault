@@ -3,6 +3,15 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    globals: false,
+    setupFiles: ['./src/test/setup.js'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+    },
+  },
   // Served under /superadmin/ so the consumer app's dev server (frontend/
   // vite.config.js) can transparently proxy that one path prefix here —
   // one memorable URL (localhost:5173/superadmin) instead of a second port,
