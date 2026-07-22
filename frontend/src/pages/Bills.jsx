@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Plus, Pencil, Trash2, Zap, Pause, Play, CheckCircle2, Clock3, CalendarClock, Wallet, Receipt, Info,
+  Plus, Pencil, Trash2, CheckCircle2, Clock3, CalendarClock, Wallet, Receipt,
   ArrowDownRight, ArrowUpRight, ArrowLeftRight, X,
 } from 'lucide-react';
-import { Button, Card, KpiCard, Chip, Modal, ConfirmDialog, IconButton, Field, Input, Select, EmptyState, Alert, Tooltip, RequiredLabel, IconSelect, DynamicIcon } from '../components/ui/index.js';
+import { Button, Card, KpiCard, Chip, Modal, ConfirmDialog, IconButton, Field, Input, Select, EmptyState, RequiredLabel, IconSelect, DynamicIcon } from '../components/ui/index.js';
 import { billsApi, categoriesApi, accountsApi, formatCurrency, formatDate } from '../lib/api.js';
 import { useTxCreatedListener, notifyTxCreated } from '../context/NewTransactionContext.jsx';
 import { useAccountsGate } from '../context/AccountsGateContext.jsx';
@@ -32,7 +32,7 @@ const QUICK_TAGS = ['Savings', 'Investment', 'Protection', 'Expenditure', 'Incom
 function blankForm(accounts) {
   return {
     name: '', type: 'expense', amount: '', category: CATEGORY_LABELS[0], categoryId: '', dueDate: new Date().toISOString().slice(0, 10),
-    frequency: 'monthly', vendor: '', paymentMethod: 'Bank Transfer', note: '', labels: [], autoPost: false, active: true, autopay: false,
+    frequency: 'monthly', vendor: '', paymentMethod: 'Bank Transfer', note: '', labels: [], active: true,
     accountId: accounts[0]?.id || '', fromAccountId: accounts[0]?.id || '', toAccountId: accounts[1]?.id || '',
   };
 }
@@ -41,29 +41,17 @@ function urgencyDays(dueDate) {
   return Math.round((new Date(dueDate) - new Date()) / 86400000);
 }
 
-// Names the two calendar months right before this one (e.g. run in
-// September -> "July"/"August") so the "First Time Adding Bills?" example
-// always reads as genuinely recent instead of a hardcoded "June or July".
-function monthNameAgo(n) {
-  const d = new Date();
-  d.setDate(1); // avoid a day-31 rollover skipping a short month when setMonth is applied
-  d.setMonth(d.getMonth() - n);
-  return d.toLocaleString('en-US', { month: 'long' });
-}
-
 function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
   const [form, setForm] = useState(blankForm(accounts));
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
-  const [tipExpanded, setTipExpanded] = useState(false);
   const [labelInput, setLabelInput] = useState('');
 
   useEffect(() => {
     if (!open) return;
     setError('');
     setFieldErrors({});
-    setTipExpanded(false);
     setLabelInput('');
     if (editing) {
       setForm({
@@ -71,7 +59,7 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
         categoryId: editing.categoryId || '', dueDate: editing.dueDate, frequency: editing.frequency,
         vendor: editing.vendor || '', paymentMethod: editing.paymentMethod || 'Bank Transfer', note: editing.note || '',
         labels: editing.labels || [],
-        autoPost: !!editing.autoPost, active: editing.active !== false, autopay: !!editing.autopay,
+        active: editing.active !== false,
         accountId: editing.accountId || accounts[0]?.id || '',
         fromAccountId: editing.fromAccountId || accounts[0]?.id || '',
         toAccountId: editing.toAccountId || accounts[1]?.id || '',
@@ -128,40 +116,10 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
     }
   }
 
-  const subtitle = form.autoPost
-    ? 'Auto-post: the backend will post a transaction on each due date.'
-    : 'Reminder: mark it paid yourself each cycle.';
-  const exampleMonth = monthNameAgo(1);
-  const earlierExampleMonth = monthNameAgo(2);
-
   return (
-    <Modal open={open} onClose={onClose} title={editing ? 'Edit bill' : 'Add bill'} subtitle={subtitle} size="md">
+    <Modal open={open} onClose={onClose} title={editing ? 'Edit bill' : 'Add bill'} subtitle="Track this bill and mark it paid yourself each cycle." size="md">
       <form onSubmit={handleSubmit} className="space-y-4">
         {error && <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
-
-        <Alert tone="info" title="💡 First Time Adding Bills?">
-          <div className={tipExpanded ? '' : 'line-clamp-4'}>
-            <p>If you're entering bills from previous months (for example, {earlierExampleMonth} or {exampleMonth}), leave the options below turned OFF.</p>
-            <p className="mt-2">
-              After you've recorded the payment and marked the bill as &quot;Paid&quot;, edit the bill and enable the recurring
-              options so future bills are handled automatically.
-            </p>
-            <p className="mt-2 font-semibold text-fg">Example:</p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-4">
-              <li>Today you add your {exampleMonth} Rent bill.</li>
-              <li>Save it without enabling the options below.</li>
-              <li>Mark the {exampleMonth} bill as Paid.</li>
-              <li>Then enable the recurring options so the bill is automatically managed from the next billing cycle onward.</li>
-            </ul>
-          </div>
-          <button
-            type="button"
-            onClick={() => setTipExpanded((v) => !v)}
-            className="mt-1.5 text-xs font-semibold text-brand-500 hover:text-brand-400"
-          >
-            {tipExpanded ? 'Show less' : 'Read more'}
-          </button>
-        </Alert>
 
         <div className="flex gap-2 rounded-xl border border-line bg-surface-2 p-1">
           {TYPES.map((t) => (
@@ -315,54 +273,6 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
 
         <Field label="Note"><Input value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} placeholder="Optional" /></Field>
 
-        <div className="rounded-xl border border-line p-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.autoPost} onChange={(e) => setForm((f) => ({ ...f, autoPost: e.target.checked }))} className="h-4 w-4 rounded border-line" />
-            <span className="font-medium text-fg">Automatically create a transaction on every due date</span>
-            <Tooltip
-              side="bottom"
-              label={
-                <>
-                  <p>When the bill reaches its due date, the app will automatically create a transaction in your account.</p>
-                  <p className="mt-1.5 text-app/70">Example: Rent is due on the 1st of every month. On the 1st, the app automatically creates a Rent expense transaction.</p>
-                </>
-              }
-            >
-              <Info size={14} className="text-subtle" />
-            </Tooltip>
-          </label>
-          {form.autoPost && (
-            <label className="mt-2 flex items-center gap-2 pl-6 text-sm text-muted">
-              <input type="checkbox" checked={form.active} onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))} className="h-4 w-4 rounded border-line" />
-              Active — turn this off to pause it temporarily without deleting the bill
-            </label>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-line p-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.autopay} onChange={(e) => setForm((f) => ({ ...f, autopay: e.target.checked }))} className="h-4 w-4 rounded border-line" />
-            <span className="font-medium text-fg">This bill is paid automatically by my bank</span>
-            <Tooltip
-              side="bottom"
-              label={
-                <>
-                  <p>Enable this if your bank or card automatically pays this bill every month. The app will only send reminders and track the bill — it will not expect you to manually pay it.</p>
-                  <p className="mt-1.5 text-app/70">Example: Netflix is automatically charged to your credit card every month. Enable this option so the app knows the payment is handled automatically.</p>
-                </>
-              }
-            >
-              <Info size={14} className="text-subtle" />
-            </Tooltip>
-          </label>
-        </div>
-
-        {(form.autoPost || form.autopay) && (
-          <Alert tone="success">
-            You are enabling recurring automation for future billing cycles only. Previous bills will not be modified.
-          </Alert>
-        )}
-
         <div className="grid grid-cols-2 gap-3 pt-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
           <Button type="submit" disabled={submitting}>{submitting ? 'Saving…' : editing ? 'Save changes' : 'Add bill'}</Button>
@@ -372,10 +282,9 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
   );
 }
 
-function BillCard({ bill, accounts, onMarkPaid, onMarkPending, onRunNow, onToggleActive, onEdit, onDelete }) {
+function BillCard({ bill, accounts, onMarkPaid, onMarkPending, onEdit, onDelete }) {
   const days = urgencyDays(bill.dueDate);
   const urgent = bill.status === 'pending' && days <= 5;
-  const paused = bill.autoPost && bill.active === false;
   const isTransfer = bill.type === 'transfer';
   const freqLabel = bill.frequency === 'one-time' ? 'One-time' : bill.frequency[0].toUpperCase() + bill.frequency.slice(1);
   const subtitle = isTransfer
@@ -394,34 +303,115 @@ function BillCard({ bill, accounts, onMarkPaid, onMarkPending, onRunNow, onToggl
         <Chip tone={urgent ? 'danger' : 'neutral'}>
           <CalendarClock size={12} /> Due {formatDate(bill.dueDate)}{urgent ? (days < 0 ? ` · ${Math.abs(days)} day(s) ago` : ` · in ${days} day(s)`) : ''}
         </Chip>
-        {bill.autoPost && <Chip tone="brand">🔄 Auto-post</Chip>}
-        {bill.autopay && <Chip tone="warning">⚡ Autopay</Chip>}
-        {paused && <Chip tone="neutral">Paused</Chip>}
       </div>
       <div className="mt-3 flex items-center justify-between gap-2">
         {bill.status === 'paid' ? (
           <button onClick={() => onMarkPending(bill)} className="flex items-center gap-1 text-xs font-semibold text-muted hover:text-fg">
             <Clock3 size={13} /> Mark as pending
           </button>
-        ) : !bill.autoPost ? (
+        ) : (
           <Button size="sm" variant="outline" fullWidth onClick={() => onMarkPaid(bill)} leftIcon={<CheckCircle2 size={14} />}>
             Mark as paid
           </Button>
-        ) : null}
+        )}
         <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
-          {bill.autoPost && bill.status === 'pending' && (
-            <>
-              <button onClick={() => onRunNow(bill)} title="Run now (post a transaction immediately, even if paused)" className="rounded-lg p-1.5 text-amber-500 hover:bg-amber-500/10"><Zap size={14} /></button>
-              <button onClick={() => onToggleActive(bill)} title={paused ? 'Resume auto-post' : 'Pause auto-post'} className="rounded-lg p-1.5 text-muted hover:bg-tint/[0.06]">
-                {paused ? <Play size={14} /> : <Pause size={14} />}
-              </button>
-            </>
-          )}
           <IconButton icon={Pencil} label="Edit bill" title="Edit bill" onClick={() => onEdit(bill)} />
           <IconButton icon={Trash2} variant="danger" label="Delete bill" title="Delete bill" onClick={() => onDelete(bill)} />
         </div>
       </div>
     </Card>
+  );
+}
+
+// Confirmation step for "Mark as paid" — the user pays this bill outside the
+// app (bank transfer, card, cash, etc.) and comes back here to record it.
+// Paid date/account/payment method/notes are annotations on the transaction
+// this creates, not edits to the recurring bill's own stored defaults — see
+// the `paid*` keys sent in Bills()'s markPaid handler.
+function MarkPaidModal({ open, bill, accounts, onClose, onConfirm }) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState({ paidDate: todayIso, accountId: '', paymentMethod: 'Bank Transfer', note: '' });
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!open || !bill) return;
+    setError('');
+    setForm({
+      paidDate: todayIso,
+      accountId: (bill.type === 'transfer' ? bill.fromAccountId : bill.accountId) || accounts[0]?.id || '',
+      paymentMethod: bill.paymentMethod || 'Bank Transfer',
+      note: '',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, bill]);
+
+  if (!bill) return null;
+
+  async function handleConfirm() {
+    setSubmitting(true);
+    setError('');
+    try {
+      await onConfirm(bill, form);
+    } catch (err) {
+      setError(err.message || 'Could not record this payment.');
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={submitting ? () => {} : onClose}
+      title="Mark as paid"
+      subtitle="Record a payment you've already made outside the app."
+      size="md"
+      footer={
+        <div className="grid grid-cols-2 gap-3">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>Cancel</Button>
+          <Button type="button" onClick={handleConfirm} disabled={submitting}>{submitting ? 'Saving…' : 'Mark as Paid'}</Button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {error && <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
+
+        <div className="flex items-center justify-between rounded-xl border border-line bg-surface-2 px-3 py-2.5">
+          <p className="text-sm font-semibold text-fg">{bill.name}</p>
+          <p className="font-display text-sm font-bold text-fg">{formatCurrency(bill.amount)}</p>
+        </div>
+
+        <Field label="Paid date">
+          <Input type="date" max={todayIso} value={form.paidDate} onChange={(e) => setForm((f) => ({ ...f, paidDate: e.target.value }))} />
+        </Field>
+
+        <Field label="Paid from account">
+          <IconSelect
+            value={form.accountId} options={accounts} placeholder="Select account"
+            onChange={(id) => setForm((f) => ({ ...f, accountId: id }))}
+            renderIcon={(a) => (
+              <span className="flex h-6 w-6 items-center justify-center rounded-md" style={{ background: `${a.color}22`, color: a.color }}>
+                <DynamicIcon name={a.icon} size={13} />
+              </span>
+            )}
+          />
+        </Field>
+
+        <Field label="Payment method">
+          <Select value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
+            {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+          </Select>
+        </Field>
+
+        <Field label="Category">
+          <p className="rounded-xl border border-line bg-surface-2 px-3 py-2 text-sm text-muted">{bill.category || '—'}</p>
+        </Field>
+
+        <Field label="Notes">
+          <Input value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} placeholder="Optional" />
+        </Field>
+      </div>
+    </Modal>
   );
 }
 
@@ -431,6 +421,7 @@ export default function Bills() {
   const [accounts, setAccounts] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [payingBill, setPayingBill] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -480,22 +471,22 @@ export default function Bills() {
   }
   if (!hasAccounts) return <MandatoryAccountGate />;
 
-  async function markPaid(bill) {
-    const updated = await billsApi.update(bill.id, { status: 'paid' });
+  async function markPaid(bill, payload) {
+    const body = {
+      status: 'paid',
+      paidDate: payload.paidDate,
+      paidPaymentMethod: payload.paymentMethod,
+      paidNote: payload.note,
+    };
+    if (bill.type === 'transfer') body.paidFromAccountId = payload.accountId;
+    else body.paidAccountId = payload.accountId;
+    const updated = await billsApi.update(bill.id, body);
     if (updated?.postedTransaction) notifyTxCreated();
+    setPayingBill(null);
     load();
   }
   async function markPending(bill) {
     await billsApi.update(bill.id, { status: 'pending' });
-    load();
-  }
-  async function runNow(bill) {
-    await billsApi.run(bill.id);
-    notifyTxCreated();
-    load();
-  }
-  async function toggleActive(bill) {
-    await billsApi.update(bill.id, { active: bill.active === false });
     load();
   }
   async function handleDelete(id) {
@@ -520,7 +511,7 @@ export default function Bills() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-display text-lg font-semibold text-fg">Recurring & Bills</h2>
-          <p className="text-sm text-muted">Reminders you mark paid, plus subscriptions that post automatically.</p>
+          <p className="text-sm text-muted">Pay these outside the app, then mark them paid here to keep your records in sync.</p>
         </div>
         <Button leftIcon={<Plus size={15} />} onClick={() => { setEditing(null); setModalOpen(true); }}>Add bill</Button>
       </div>
@@ -543,7 +534,7 @@ export default function Bills() {
                 {pending.map((b) => (
                   <BillCard
                     key={b.id} bill={b} accounts={accounts}
-                    onMarkPaid={markPaid} onMarkPending={markPending} onRunNow={runNow} onToggleActive={toggleActive}
+                    onMarkPaid={setPayingBill} onMarkPending={markPending}
                     onEdit={editBill} onDelete={setConfirmDelete}
                   />
                 ))}
@@ -561,7 +552,7 @@ export default function Bills() {
                 {paid.map((b) => (
                   <BillCard
                     key={b.id} bill={b} accounts={accounts}
-                    onMarkPaid={markPaid} onMarkPending={markPending} onRunNow={runNow} onToggleActive={toggleActive}
+                    onMarkPaid={setPayingBill} onMarkPending={markPending}
                     onEdit={editBill} onDelete={setConfirmDelete}
                   />
                 ))}
@@ -572,6 +563,8 @@ export default function Bills() {
       )}
 
       <BillModal open={modalOpen} onClose={() => setModalOpen(false)} editing={editing} categories={categories} accounts={accounts} onSaved={load} />
+
+      <MarkPaidModal open={!!payingBill} bill={payingBill} accounts={accounts} onClose={() => setPayingBill(null)} onConfirm={markPaid} />
 
       <ConfirmDialog
         open={!!confirmDelete}

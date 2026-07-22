@@ -29,7 +29,7 @@ const BUDGET_FIELDS = [
 const BILL_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['type', 'type'], ['amount', 'amount'], ['due_date', 'dueDate'], ['frequency', 'frequency'],
   ['status', 'status'], ['category', 'category'], ['category_id', 'categoryId'], ['vendor', 'vendor'], ['payment_method', 'paymentMethod'],
-  ['note', 'note'], ['labels', 'labels'], ['auto_post', 'autoPost'], ['autopay', 'autopay'], ['active', 'active'], ['last_run', 'lastRun'],
+  ['note', 'note'], ['labels', 'labels'], ['active', 'active'], ['last_run', 'lastRun'],
   ['account_id', 'accountId'], ['from_account_id', 'fromAccountId'], ['to_account_id', 'toAccountId'],
 ];
 const GOAL_FIELDS = [
@@ -51,6 +51,7 @@ const PROFILE_FIELDS = [
   ['dashboard_layout', 'dashboardLayout'], ['has_password', 'hasPassword'], ['country', 'country'], ['status', 'status'],
   ['sessions_invalidated_at', 'sessionsInvalidatedAt'], ['email', 'email'],
   ['feedback_prompt_snoozed_until', 'feedbackPromptSnoozedUntil'], ['feedback_prompt_disabled', 'feedbackPromptDisabled'],
+  ['date_of_birth', 'dateOfBirth'], ['timezone', 'timezone'],
 ];
 // Payment-time log backing BillAnalysisService's payment-history/late-payment
 // insights (see 0007_bill_payments.sql) — write-once per payment, read via
@@ -151,6 +152,17 @@ async function insertTransactionsBulk(userId, rows) {
   return rowsToCamel(data, TRANSACTION_FIELDS);
 }
 
+// Re-reads just the bills table straight from the DB, bypassing whatever a
+// given request's own getUserBundle() snapshot already has cached in memory
+// — used by server.js's per-user auto-post lock to re-validate a bill's
+// due_date right before posting, since two concurrent requests' snapshots
+// can otherwise both look "due" even after one of them has already advanced
+// the real row.
+async function getBills(userId) {
+  const bills = await fetchAll('bills', userId);
+  return rowsToCamel(bills, BILL_FIELDS);
+}
+
 async function getProfile(userId) {
   const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
   if (error) throw error;
@@ -220,6 +232,7 @@ async function incrementAiUsage(userId) {
 
 module.exports = {
   getUserBundle,
+  getBills,
   getProfile,
   updateProfile,
   getNotificationOverlay,

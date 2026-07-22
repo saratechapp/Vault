@@ -110,24 +110,6 @@ function advanceDate(dateStr, frequency) {
   }
   return iso(d);
 }
-// Rolls a due date forward, one cycle at a time, until it's no longer in the
-// past. Applied whenever a bill's autoPost is being turned on: without this,
-// enabling auto-post on a bill someone backdated (e.g. logging June's rent
-// bill in September) would make the catch-up sweep in
-// processAutoPostBillsForUser immediately post one transaction for every
-// missed cycle between then and today. Auto-post must only ever affect
-// future occurrences — see FEATURES.md's Recurring & Bills business rules.
-function nextFutureDueDate(dueDate, frequency) {
-  const today = iso(new Date());
-  let next = dueDate;
-  let guard = 0;
-  while (next < today && guard < 1000) {
-    next = advanceDate(next, frequency);
-    guard++;
-  }
-  return next;
-}
-
 // ---------------------------------------------------------------------------
 // response cache-busting — bumped whenever any write happens, so sendJSON's
 // ETag changes and clients don't get a stale 304 for data that just changed,
@@ -142,102 +124,78 @@ function bumpCache(userId) {
 }
 
 // ---------------------------------------------------------------------------
-// auto-post engine
+// bill payment posting — shared by the manual "Mark as Paid" branch of
+// PATCH /api/bills/:id below (the only way a bill ever posts a transaction
+// now that the auto-post engine has been removed: every payment requires an
+// explicit human confirmation).
 // ---------------------------------------------------------------------------
 // `extraLabels` are system tags the caller wants stamped on top (e.g.
-// 'auto-post', 'bill-payment') — merged with the bill's own tags/labels
-// (set in the Add/Edit bill form's Tags field) rather than replacing them,
-// so a bill tagged "Savings" still shows that tag on the transaction it
-// posts, not just the system tag.
-function buildBillTransaction(bill, { note, extraLabels = [], date }) {
+// 'bill-payment') — merged with the bill's own tags/labels (set in the
+// Add/Edit bill form's Tags field) rather than replacing them, so a bill
+// tagged "Savings" still shows that tag on the transaction it posts, not
+// just the system tag.
+function buildBillTransaction(bill, { note, extraLabels = [], date, paymentMethod, accountId, fromAccountId, toAccountId }) {
   const isTransfer = bill.type === 'transfer';
   const labels = [...new Set([...(bill.labels || []), ...extraLabels])];
   return {
-    // Auto-post's catch-up run (postBillTransaction, below) intentionally
-    // omits `date` so it keeps dating the transaction at the bill's own
-    // schedule — an auto-pay is meant to have happened on its due date even
-    // if the server only got around to inserting the row later. A manual
-    // "Pay" (the PATCH handler's bill-payment branch) passes the actual
-    // payment timestamp here instead, since that's a one-off action the user
-    // is taking right now, not a scheduled auto-charge.
+    // A manual "Mark as Paid" passes the actual payment timestamp (or a
+    // user-chosen past date) here; falls back to the bill's own due date if
+    // omitted.
     date: date || bill.dueDate,
     vendor: bill.vendor || bill.name,
     categoryId: bill.categoryId || null,
     amount: isTransfer ? Math.abs(numOr(bill.amount)) : signAmount(bill.type, bill.amount),
     type: bill.type,
-    paymentMethod: bill.paymentMethod || 'Bank Transfer',
+    paymentMethod: paymentMethod || bill.paymentMethod || 'Bank Transfer',
     note,
     labels,
     sourceBillId: bill.id,
-    ...(isTransfer ? { fromAccountId: bill.fromAccountId, toAccountId: bill.toAccountId } : { accountId: bill.accountId }),
+    ...(isTransfer
+      ? { fromAccountId: fromAccountId || bill.fromAccountId, toAccountId: toAccountId || bill.toAccountId }
+      : { accountId: accountId || bill.accountId }),
   };
 }
-// Inserts the generated transaction via db.insertTransaction (Postgres
-// assigns the real id) and writes the bill's advanced dueDate/status/active/
-// lastRun via db.updateBill, while also mirroring both changes into the
-// already-fetched in-memory userData arrays so the rest of the same request
-// sees them without a re-fetch (mirrors the old single-process-memory model).
-async function postBillTransaction(userId, userData, bill) {
-  // Captured before advanceDate mutates bill.dueDate below — see
-  // 0007_bill_payments.sql's comment on why this can't be reconstructed
-  // after the fact from the bill's (now-rolled-forward) current due date.
-  const dueDateAtPayment = bill.dueDate;
-  const txn = await db.insertTransaction(userId, buildBillTransaction(bill, { note: `${bill.note ? bill.note + ' · ' : ''}[auto-post]`, extraLabels: ['auto-post'] }));
-  userData.transactions.push(txn);
-  const paidDate = iso(new Date());
-  const patch = {};
-  if (bill.frequency === 'one-time') {
-    bill.status = 'paid';
-    bill.active = false;
-    patch.status = 'paid';
-    patch.active = false;
-  } else {
-    bill.dueDate = advanceDate(bill.dueDate, bill.frequency);
-    patch.dueDate = bill.dueDate;
+// Rolls the just-inserted transaction back if 23505 (unique_violation on
+// bill_payments_bill_cycle_uidx, see 0016_bill_payments_unique_cycle.sql)
+// fires, meaning some other request already logged this exact bill+cycle —
+// a backstop for anything runExclusiveForUserBills' serialization doesn't
+// already prevent (e.g. a second server instance under horizontal scaling).
+async function logBillPayment(userId, userData, txn, { billId, dueDateAtPayment, paidDate }) {
+  try {
+    const paymentLog = await db.insertBillPayment(userId, {
+      billId, transactionId: txn.id, dueDateAtPayment, paidDate, wasLate: paidDate > dueDateAtPayment,
+    });
+    userData.billPayments.push(paymentLog);
+  } catch (err) {
+    if (err.code === '23505') {
+      await db.deleteTransaction(userId, txn.id);
+      userData.transactions = userData.transactions.filter((t) => t.id !== txn.id);
+      const dup = new Error('This bill cycle was already posted.');
+      dup.code = 'DUPLICATE_BILL_CYCLE';
+      throw dup;
+    }
+    throw err;
   }
-  bill.lastRun = new Date().toISOString();
-  patch.lastRun = bill.lastRun;
-  await db.updateBill(userId, bill.id, patch);
-  const paymentLog = await db.insertBillPayment(userId, {
-    billId: bill.id, transactionId: txn.id,
-    dueDateAtPayment, paidDate, wasLate: paidDate > dueDateAtPayment,
-  });
-  userData.billPayments.push(paymentLog);
-  return txn;
 }
-// Runs on *every* authenticated request (see requireAuth below), so it sits
-// directly in front of every page load's latency. Catching up N overdue
-// bills used to await each one's insert+update round trips strictly in
-// sequence — one user with several months of backlog across a few bills
-// could add seconds to every single API call, not just the first. Each
-// bill's own catch-up (dueDate must advance one cycle at a time) still has
-// to stay sequential internally, but different bills don't depend on each
-// other, so they now run concurrently via Promise.all instead of one after
-// another.
-async function processAutoPostBillsForUser(userId, userData) {
-  const today = iso(new Date());
-  const due = (userData.bills || []).filter((bill) => bill.autoPost && bill.active !== false);
 
-  const generatedCounts = await Promise.all(due.map(async (bill) => {
-    if (!isValidDateStr(bill.dueDate)) {
-      console.warn(`[auto-post] skipping bill ${bill.id} — invalid dueDate: ${JSON.stringify(bill.dueDate)}`);
-      return 0;
-    }
-    let generated = 0;
-    let iterations = 0;
-    try {
-      while (bill.active !== false && bill.dueDate <= today && iterations < 24) {
-        await postBillTransaction(userId, userData, bill);
-        generated++;
-        iterations++;
-      }
-    } catch (err) {
-      console.warn(`[auto-post] error processing bill ${bill.id}:`, err.message);
-    }
-    return generated;
-  }));
-
-  return { active: due.length, generated: generatedCounts.reduce((a, b) => a + b, 0) };
+// Per-user serialization for the manual-pay branch of PATCH /api/bills/:id —
+// the only path that can post a bill-cycle transaction. Without this, two
+// concurrent "mark as paid" PATCHes on one bill (a fast double-tap, a client
+// retry) could both see wasPending from their own pre-lock snapshot and both
+// book a transaction for the same cycle. Keyed by userId and chained so
+// overlapping requests await the same queue instead of running concurrently;
+// the tail promise is always caught so one user's failed turn can't jam the
+// queue for their own next request.
+const billWriteQueues = new Map();
+function runExclusiveForUserBills(userId, task) {
+  const tail = (billWriteQueues.get(userId) || Promise.resolve()).catch(() => {});
+  const result = tail.then(task);
+  const settled = result.catch(() => {});
+  billWriteQueues.set(userId, settled);
+  settled.finally(() => {
+    if (billWriteQueues.get(userId) === settled) billWriteQueues.delete(userId);
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,11 +375,6 @@ async function requireAuth(req, res, next) {
       adminDb.isActiveAdmin(req.userId),
     ]);
 
-    // Catch up any auto-post bills that came due since this user's last
-    // authenticated request. There's no more single in-memory blob to sweep
-    // at server boot, so that pass is gone (see boot section) — every user
-    // self-catches-up here on their next request instead.
-    await processAutoPostBillsForUser(req.userId, req.userData);
     next();
   } catch (err) {
     next(err);
@@ -502,6 +455,28 @@ app.patch('/api/me', requireAuth, ah(async (req, res) => {
     }
     patch.currencySymbol = body.currencySymbol;
   }
+  // Public URL of an object the client already uploaded to the `avatars`
+  // Storage bucket under its own user-id folder (see
+  // supabase/migrations/0015_avatar_storage.sql) — this endpoint only ever
+  // records the resulting URL, it doesn't handle the upload itself.
+  if (body.avatar !== undefined) {
+    if (typeof body.avatar !== 'string' || body.avatar.length > 2000) {
+      return res.status(400).json({ error: 'avatar must be a URL string' });
+    }
+    patch.avatar = body.avatar;
+  }
+  if (body.dateOfBirth !== undefined) {
+    if (body.dateOfBirth !== null && Number.isNaN(Date.parse(body.dateOfBirth))) {
+      return res.status(400).json({ error: 'dateOfBirth must be a valid date or null' });
+    }
+    patch.dateOfBirth = body.dateOfBirth;
+  }
+  if (body.timezone !== undefined) {
+    if (body.timezone !== null && (typeof body.timezone !== 'string' || body.timezone.length > 100)) {
+      return res.status(400).json({ error: 'timezone must be a string' });
+    }
+    patch.timezone = body.timezone;
+  }
   // Feedback popup dismissal — "Remind me later" (snooze) / "Don't ask
   // again" (disable). Persisted here (not just localStorage) so dismissing
   // on one device carries over to another.
@@ -525,6 +500,18 @@ app.patch('/api/me', requireAuth, ah(async (req, res) => {
 // Idempotent; no request body.
 app.post('/api/me/password-set', requireAuth, ah(async (req, res) => {
   await db.updateProfile(req.userId, { hasPassword: true });
+  res.json({ ok: true });
+}));
+
+// Permanently deletes the signed-in user. Every entity table (categories,
+// accounts, transactions, budgets, bills, goals, debts, templates,
+// bill_payments) and the profiles row itself FK to auth.users(id) with
+// `on delete cascade` (see supabase/migrations/0001_init.sql), so removing
+// the auth user via the service-role admin client is enough to clean up
+// everything this user owns in one call — no per-table deletes needed here.
+app.delete('/api/me', requireAuth, ah(async (req, res) => {
+  const { error } = await supabase.auth.admin.deleteUser(req.userId);
+  if (error) throw error;
   res.json({ ok: true });
 }));
 
@@ -971,19 +958,15 @@ app.post('/api/bills', requireAuth, ah(async (req, res) => {
   if (type === 'transfer') {
     if (!b.fromAccountId || !b.toAccountId) return res.status(400).json({ error: 'Transfers need both a from and to account.' });
     if (b.fromAccountId === b.toAccountId) return res.status(400).json({ error: 'From and to accounts must be different.' });
-  } else if (b.autoPost && !b.categoryId) {
-    return res.status(400).json({ error: 'Auto-post bills need a category so we know how to book the transaction.' });
   }
   const badField = foreignAccountField(req.userData, b, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
   const frequency = b.frequency || 'monthly';
-  const dueDate = (b.autoPost && frequency !== 'one-time') ? nextFutureDueDate(b.dueDate, frequency) : b.dueDate;
   const bill = await db.insertBill(req.userId, {
     name: b.name, type, amount: Number(b.amount),
-    dueDate, frequency, status: b.status || 'pending',
+    dueDate: b.dueDate, frequency, status: b.status || 'pending',
     category: b.category || '', categoryId: type === 'transfer' ? categoryIdByName(req.userData.categories, 'Transfer') : b.categoryId || null, vendor: b.vendor || '',
     paymentMethod: b.paymentMethod || '', note: b.note || '', labels: Array.isArray(b.labels) ? b.labels : [],
-    autoPost: !!b.autoPost, autopay: !!b.autopay,
     active: b.active !== undefined ? !!b.active : true,
     ...(type === 'transfer'
       ? { fromAccountId: b.fromAccountId, toAccountId: b.toAccountId }
@@ -1002,21 +985,31 @@ app.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
     return res.status(400).json({ error: 'dueDate must be a valid date' });
   }
   const nextType = body.type !== undefined ? body.type : bill.type;
-  const nextAutoPost = body.autoPost !== undefined ? !!body.autoPost : bill.autoPost;
-  const nextCategoryId = body.categoryId !== undefined ? body.categoryId : bill.categoryId;
   const nextFromAccountId = body.fromAccountId !== undefined ? body.fromAccountId : bill.fromAccountId;
   const nextToAccountId = body.toAccountId !== undefined ? body.toAccountId : bill.toAccountId;
   if (nextType === 'transfer') {
     if (!nextFromAccountId || !nextToAccountId) return res.status(400).json({ error: 'Transfers need both a from and to account.' });
     if (nextFromAccountId === nextToAccountId) return res.status(400).json({ error: 'From and to accounts must be different.' });
-  } else if (nextAutoPost && !nextCategoryId) {
-    return res.status(400).json({ error: 'Auto-post bills need a category so we know how to book the transaction.' });
   }
   const badField = foreignAccountField(req.userData, body, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
+  // Per-payment overrides (paidDate/paidPaymentMethod/paidNote/paidAccountId/
+  // paidFromAccountId/paidToAccountId) annotate this one payment's posted
+  // transaction only — they're deliberately kept out of the generic
+  // field-patch whitelist below so they can never redefine the recurring
+  // bill's own stored defaults for future cycles.
+  let paidDate = iso(new Date());
+  if (body.paidDate !== undefined) {
+    if (!isValidDateStr(body.paidDate)) return res.status(400).json({ error: 'paidDate must be a valid date' });
+    if (body.paidDate > iso(new Date())) return res.status(400).json({ error: "Paid date can't be in the future." });
+    paidDate = body.paidDate;
+  }
+  const paidOverrideFields = { accountId: body.paidAccountId, fromAccountId: body.paidFromAccountId, toAccountId: body.paidToAccountId };
+  const badPaidField = foreignAccountField(req.userData, paidOverrideFields, ACCOUNT_FIELDS);
+  if (badPaidField) return res.status(400).json({ error: `paid${badPaidField[0].toUpperCase()}${badPaidField.slice(1)} must reference one of your own accounts` });
   const wasPending = bill.status === 'pending';
   const patch = {};
-  ['name', 'type', 'amount', 'dueDate', 'frequency', 'status', 'category', 'categoryId', 'vendor', 'paymentMethod', 'note', 'labels', 'autoPost', 'autopay', 'active', 'accountId', 'fromAccountId', 'toAccountId'].forEach((f) => {
+  ['name', 'type', 'amount', 'dueDate', 'frequency', 'status', 'category', 'categoryId', 'vendor', 'paymentMethod', 'note', 'labels', 'active', 'accountId', 'fromAccountId', 'toAccountId'].forEach((f) => {
     if (body[f] !== undefined) {
       let value = body[f];
       if (f === 'amount') value = Number(value);
@@ -1030,60 +1023,68 @@ app.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
     bill.categoryId = transferCategoryId;
     patch.categoryId = transferCategoryId;
   }
-  // Auto-post must only ever affect future occurrences (never backfill past
-  // due dates) — see nextFutureDueDate's comment. Applies whether autoPost
-  // is being turned on right now or was already on and dueDate/frequency
-  // just changed underneath it.
-  const nextFrequency = body.frequency !== undefined ? body.frequency : bill.frequency;
-  if (nextAutoPost && nextFrequency !== 'one-time') {
-    const rolled = nextFutureDueDate(bill.dueDate, nextFrequency);
-    if (rolled !== bill.dueDate) {
-      bill.dueDate = rolled;
-      patch.dueDate = rolled;
-    }
-  }
-  // Reminder-only bills (autoPost off) don't get an automatic ledger post from
-  // the catch-up engine, so marking one paid here books the transaction itself,
+  // Every bill now requires an explicit human "Mark as Paid" confirmation —
+  // there's no more automatic engine that could have already posted this
+  // cycle, so marking one paid here always books the transaction itself,
   // then rolls it to the next due date (or closes it out if one-time).
+  //
+  // Serialized per-user (runExclusiveForUserBills) and re-checks the bill's
+  // real status straight from the DB once it's actually this request's turn
+  // — two concurrent PATCH {status:'paid'} calls on the same bill (a fast
+  // double-tap beating the client's own disabled-while-saving guard, or a
+  // retried request after a dropped response) would otherwise both see
+  // wasPending from their own pre-lock snapshot and both book a transaction
+  // for the same cycle.
   let postedTxn = null;
-  if (body.status === 'paid' && wasPending && !bill.autoPost) {
-    // Captured before advanceDate mutates bill.dueDate below — see
-    // 0007_bill_payments.sql's comment on why this can't be reconstructed
-    // after the fact from the bill's (now-rolled-forward) current due date.
-    const dueDateAtPayment = bill.dueDate;
-    const paidDate = iso(new Date());
-    postedTxn = await db.insertTransaction(req.userId, buildBillTransaction(bill, { note: bill.note || '', extraLabels: ['bill-payment'], date: paidDate }));
-    req.userData.transactions.push(postedTxn);
-    if (bill.frequency === 'one-time') {
-      bill.active = false;
-      patch.active = false;
-    } else {
-      bill.dueDate = advanceDate(bill.dueDate, bill.frequency);
-      bill.status = 'pending';
-      patch.dueDate = bill.dueDate;
-      patch.status = 'pending';
-    }
-    bill.lastRun = new Date().toISOString();
-    patch.lastRun = bill.lastRun;
-    const paymentLog = await db.insertBillPayment(req.userId, {
-      billId: bill.id, transactionId: postedTxn.id,
-      dueDateAtPayment, paidDate, wasLate: paidDate > dueDateAtPayment,
+  if (body.status === 'paid' && wasPending) {
+    postedTxn = await runExclusiveForUserBills(req.userId, async () => {
+      const fresh = (await db.getBills(req.userId)).find((b) => b.id === bill.id);
+      if (!fresh || fresh.status !== 'pending') {
+        // Someone else's concurrent PATCH on this same bill already posted
+        // this cycle while we were waiting our turn — undo the "paid" guess
+        // the field loop above made and mirror their actual current state
+        // instead of stomping it with our own now-stale patch.
+        delete patch.status;
+        if (fresh) {
+          bill.status = fresh.status;
+          bill.dueDate = fresh.dueDate;
+          bill.active = fresh.active;
+          bill.lastRun = fresh.lastRun;
+        }
+        return null;
+      }
+      // Captured before advanceDate mutates bill.dueDate below — see
+      // 0007_bill_payments.sql's comment on why this can't be reconstructed
+      // after the fact from the bill's (now-rolled-forward) current due date.
+      const dueDateAtPayment = bill.dueDate;
+      const txn = await db.insertTransaction(req.userId, buildBillTransaction(bill, {
+        note: body.paidNote !== undefined ? body.paidNote : (bill.note || ''),
+        extraLabels: ['bill-payment'],
+        date: paidDate,
+        paymentMethod: body.paidPaymentMethod,
+        accountId: body.paidAccountId,
+        fromAccountId: body.paidFromAccountId,
+        toAccountId: body.paidToAccountId,
+      }));
+      req.userData.transactions.push(txn);
+      if (bill.frequency === 'one-time') {
+        bill.active = false;
+        patch.active = false;
+      } else {
+        bill.dueDate = advanceDate(bill.dueDate, bill.frequency);
+        bill.status = 'pending';
+        patch.dueDate = bill.dueDate;
+        patch.status = 'pending';
+      }
+      bill.lastRun = new Date().toISOString();
+      patch.lastRun = bill.lastRun;
+      await logBillPayment(req.userId, req.userData, txn, { billId: bill.id, dueDateAtPayment, paidDate });
+      return txn;
     });
-    req.userData.billPayments.push(paymentLog);
   }
   if (Object.keys(patch).length) await db.updateBill(req.userId, bill.id, patch);
   bumpCache(req.userId);
   res.json(postedTxn ? { ...bill, postedTransaction: postedTxn } : bill);
-}));
-
-app.post('/api/bills/:id/run', requireAuth, ah(async (req, res) => {
-  const bill = req.userData.bills.find((x) => x.id === req.params.id);
-  if (!bill) return res.status(404).json({ error: 'not found' });
-  if (!bill.autoPost) return res.status(400).json({ error: 'bill is not set to auto-post' });
-  if (!isValidDateStr(bill.dueDate)) return res.status(400).json({ error: 'this bill has an invalid dueDate — edit it before running' });
-  const txn = await postBillTransaction(req.userId, req.userData, bill);
-  bumpCache(req.userId);
-  res.json({ bill, transaction: txn });
 }));
 
 app.delete('/api/bills/:id', requireAuth, ah(async (req, res) => {
@@ -1477,15 +1478,6 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
-// No more boot-time auto-post sweep: the old file store loaded every user's
-// data into one in-memory blob at startup, so a single pass over
-// db.userData could catch up every user's bills at once. With Postgres each
-// user's data is only ever fetched per-request (db.getUserBundle inside
-// requireAuth), so there's no "all users" blob to sweep here — each user's
-// next authenticated request runs processAutoPostBillsForUser for just
-// their own data instead (see requireAuth above). Simplest option that
-// matches the new per-request-scoped design.
-
 // Guarded so this file can be `require()`'d (e.g. from unit tests importing
 // the pure helpers below) without also binding a port / needing live
 // Supabase env vars — only actually listens when run directly (`node

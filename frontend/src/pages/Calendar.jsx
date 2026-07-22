@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  ChevronLeft, ChevronRight, TrendingUp, TrendingDown, ArrowLeftRight, Scale, Receipt, CalendarDays,
+  ChevronLeft, ChevronRight, TrendingUp, TrendingDown, ArrowLeftRight, Scale, Receipt, CalendarDays, CalendarClock,
 } from 'lucide-react';
 import { Button, Card, KpiCard, Chip, Modal, EmptyState, DynamicIcon } from '../components/ui/index.js';
-import { transactionsApi, categoriesApi, accountsApi, formatCurrency } from '../lib/api.js';
+import { transactionsApi, categoriesApi, accountsApi, billsApi, formatCurrency } from '../lib/api.js';
 import { useTxCreatedListener } from '../context/NewTransactionContext.jsx';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -75,6 +76,68 @@ export function summarize(list) {
   });
   return { income, expense, transfer, net: income - expense, count: list.length };
 }
+// ---------------------------------------------------------------------------
+// Bill-due markers — projects each active bill's stored dueDate/frequency
+// into the currently displayed month, mirroring the mobile app's
+// src/features/calendar/data.ts (billEventsInMonth/occurrencesInRange) and
+// backend/server.js's own advanceDate, so a bill lands on the calendar on
+// exactly the date the server would consider its next due cycle.
+// ---------------------------------------------------------------------------
+const BILL_STATUS_TONE = { paid: 'success', overdue: 'danger', due_today: 'warning', upcoming: 'neutral' };
+const BILL_STATUS_LABEL = { paid: 'Paid', overdue: 'Overdue', due_today: 'Due today', upcoming: 'Upcoming' };
+
+function advanceBillDate(k, frequency) {
+  const d = keyToDate(k);
+  switch (frequency) {
+    case 'daily': d.setDate(d.getDate() + 1); break;
+    case 'weekly': d.setDate(d.getDate() + 7); break;
+    case 'yearly': d.setFullYear(d.getFullYear() + 1); break;
+    case 'monthly': default: d.setMonth(d.getMonth() + 1); break;
+  }
+  return dateKey(d);
+}
+function reverseBillDate(k, frequency) {
+  const d = keyToDate(k);
+  switch (frequency) {
+    case 'daily': d.setDate(d.getDate() - 1); break;
+    case 'weekly': d.setDate(d.getDate() - 7); break;
+    case 'yearly': d.setFullYear(d.getFullYear() - 1); break;
+    case 'monthly': default: d.setMonth(d.getMonth() - 1); break;
+  }
+  return dateKey(d);
+}
+function billOccurrencesInRange(anchor, frequency, rangeStart, rangeEnd) {
+  if (frequency === 'one-time') return anchor >= rangeStart && anchor <= rangeEnd ? [anchor] : [];
+  let cur = anchor;
+  let guard = 0;
+  while (cur > rangeEnd && guard < 600) { cur = reverseBillDate(cur, frequency); guard++; }
+  guard = 0;
+  while (cur < rangeStart && guard < 600) { cur = advanceBillDate(cur, frequency); guard++; }
+  const results = [];
+  guard = 0;
+  while (cur >= rangeStart && cur <= rangeEnd && guard < 60) { results.push(cur); cur = advanceBillDate(cur, frequency); guard++; }
+  return results;
+}
+function billOccurrenceStatus(bill, occurrenceDate, todayKey) {
+  if (occurrenceDate === bill.dueDate && bill.status === 'paid') return 'paid';
+  if (occurrenceDate === todayKey) return 'due_today';
+  return occurrenceDate < todayKey ? 'overdue' : 'upcoming';
+}
+function billEventsByDateInMonth(bills, focusDate, todayKey) {
+  const start = dateKey(new Date(focusDate.getFullYear(), focusDate.getMonth(), 1));
+  const end = dateKey(new Date(focusDate.getFullYear(), focusDate.getMonth() + 1, 0));
+  const map = new Map();
+  for (const bill of bills) {
+    if (bill.active === false || !bill.dueDate) continue;
+    const frequency = bill.frequency || 'monthly';
+    for (const date of billOccurrencesInRange(bill.dueDate, frequency, start, end)) {
+      if (!map.has(date)) map.set(date, []);
+      map.get(date).push({ bill, status: billOccurrenceStatus(bill, date, todayKey) });
+    }
+  }
+  return map;
+}
+
 function resolveCategory(categories, categoryId) {
   const cat = categories.find((c) => c.id === categoryId);
   if (!cat) return { category: 'Uncategorized', subcategory: null, color: '#64748b', icon: 'Circle' };
@@ -145,6 +208,37 @@ function TransactionRow({ t, categories, accounts }) {
   );
 }
 
+// Bills due on a given day — read-only reminders, not editable here. Tapping
+// one navigates to the Bills page (no per-bill deep link exists yet, so this
+// is a plain list-page navigation rather than opening the specific bill).
+function BillDueList({ entries, onPressBill }) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-subtle">
+        <CalendarClock size={12} /> Bills due
+      </p>
+      {entries.map(({ bill, status }) => (
+        <button
+          key={bill.id}
+          type="button"
+          onClick={() => onPressBill(bill)}
+          className="flex w-full items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-3 text-left transition hover:border-line-strong hover:shadow-card"
+        >
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-fg">{bill.name}</p>
+            <p className="text-xs text-subtle">{bill.category || '—'}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="font-display text-sm font-bold tabular-nums text-fg">{formatCurrency(bill.amount)}</span>
+            <Chip tone={BILL_STATUS_TONE[status]}>{BILL_STATUS_LABEL[status]}</Chip>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Timeline({ txns, categories, accounts }) {
   return (
     <div className="relative pl-6">
@@ -165,9 +259,11 @@ function Timeline({ txns, categories, accounts }) {
 }
 
 export default function CalendarPage() {
+  const navigate = useNavigate();
   const [transactions, setTransactions] = useState([]);
   const [categories, setCategories] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [bills, setBills] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [view, setView] = useState('month');
@@ -182,10 +278,11 @@ export default function CalendarPage() {
   async function load() {
     setLoadError('');
     try {
-      const [txns, cats, accs] = await Promise.all([transactionsApi.list(), categoriesApi.list(), accountsApi.list()]);
+      const [txns, cats, accs, b] = await Promise.all([transactionsApi.list(), categoriesApi.list(), accountsApi.list(), billsApi.list()]);
       setTransactions(txns || []);
       setCategories(cats || []);
       setAccounts(accs || []);
+      setBills(b || []);
     } catch (err) {
       setLoadError(err.message || 'Could not load your calendar.');
     } finally {
@@ -204,6 +301,8 @@ export default function CalendarPage() {
     return map;
   }, [transactions]);
 
+  const billsByDate = useMemo(() => billEventsByDateInMonth(bills, focusDate, todayKey), [bills, focusDate, todayKey]);
+
   const monthPrefix = `${focusDate.getFullYear()}-${pad2(focusDate.getMonth() + 1)}`;
   const monthSummary = useMemo(
     () => summarize(transactions.filter((t) => t.date.startsWith(monthPrefix))),
@@ -216,10 +315,12 @@ export default function CalendarPage() {
   const focusKey = dateKey(focusDate);
   const focusTxns = useMemo(() => [...(txnsByDate.get(focusKey) || [])].reverse(), [txnsByDate, focusKey]);
   const focusSummary = useMemo(() => summarize(focusTxns), [focusTxns]);
+  const focusBills = useMemo(() => billsByDate.get(focusKey) || [], [billsByDate, focusKey]);
 
   const selectedTxns = useMemo(() => [...(txnsByDate.get(selectedDate) || [])].reverse(), [txnsByDate, selectedDate]);
   const selectedSummary = useMemo(() => summarize(selectedTxns), [selectedTxns]);
   const selectedDateObj = useMemo(() => keyToDate(selectedDate), [selectedDate]);
+  const selectedBills = useMemo(() => billsByDate.get(selectedDate) || [], [billsByDate, selectedDate]);
 
   function goPrev() {
     if (view === 'month') setFocusDate((d) => addMonths(d, -1));
@@ -247,6 +348,9 @@ export default function CalendarPage() {
     setFocusDate(keyToDate(key));
     setView('day');
     setDayModalOpen(false);
+  }
+  function goToBills() {
+    navigate('/app/bills');
   }
 
   function onTouchStart(e) {
@@ -335,6 +439,7 @@ export default function CalendarPage() {
           <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Income</span>
           <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-rose-500" /> Expense</span>
           <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-cyan-500" /> Transfer</span>
+          <span className="flex items-center gap-1"><CalendarClock size={11} className="text-amber-500" /> Bill due</span>
         </div>
 
         <div className="mt-4" onTouchStart={view !== 'day' ? onTouchStart : undefined} onTouchEnd={view !== 'day' ? onTouchEnd : undefined}>
@@ -350,6 +455,7 @@ export default function CalendarPage() {
                   const isToday = key === todayKey;
                   const isSelected = key === selectedDate;
                   const types = new Set(list.map((t) => t.type));
+                  const dueBills = billsByDate.get(key) || [];
                   return (
                     <button
                       key={key} type="button" onClick={() => selectDate(date)}
@@ -363,6 +469,9 @@ export default function CalendarPage() {
                     >
                       {list.length > 1 && (
                         <span className="absolute right-1 top-1 rounded-full bg-tint/10 px-1 text-[9px] font-bold text-subtle">{list.length}</span>
+                      )}
+                      {dueBills.length > 0 && (
+                        <CalendarClock size={11} className="absolute left-1 top-1 text-amber-500" />
                       )}
                       <span className={`flex h-6 w-6 items-center justify-center rounded-full font-display text-xs font-bold ${isToday ? 'bg-brand-500 text-white' : 'text-fg'}`}>
                         {date.getDate()}
@@ -436,6 +545,7 @@ export default function CalendarPage() {
           {view === 'day' && (
             <div key={`day-${focusKey}`} className="animate-viewIn space-y-5">
               <DayStatBar summary={focusSummary} />
+              <BillDueList entries={focusBills} onPressBill={goToBills} />
               {focusTxns.length === 0 ? (
                 <EmptyState
                   icon={<CalendarDays size={20} />} title="No transactions"
@@ -455,6 +565,9 @@ export default function CalendarPage() {
         subtitle={`${selectedSummary.count} transaction${selectedSummary.count === 1 ? '' : 's'}`}
       >
         <DayStatBar summary={selectedSummary} />
+        <div className="mt-5">
+          <BillDueList entries={selectedBills} onPressBill={goToBills} />
+        </div>
         <div className="mt-5">
           {selectedTxns.length === 0 ? (
             <EmptyState icon={<CalendarDays size={20} />} title="No transactions" body="Nothing recorded on this day." />

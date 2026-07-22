@@ -116,7 +116,6 @@ export const billsApi = {
   list: () => api.get('/bills'),
   create: (payload) => api.post('/bills', payload),
   update: (id, payload) => api.patch(`/bills/${id}`, payload),
-  run: (id) => api.post(`/bills/${id}/run`),
   remove: (id) => api.delete(`/bills/${id}`),
 };
 
