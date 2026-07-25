@@ -116,7 +116,6 @@ export const billsApi = {
   list: () => api.get('/bills'),
   create: (payload) => api.post('/bills', payload),
   update: (id, payload) => api.patch(`/bills/${id}`, payload),
-  run: (id) => api.post(`/bills/${id}/run`),
   remove: (id) => api.delete(`/bills/${id}`),
 };
 
@@ -170,6 +169,18 @@ export const reportsApi = { get: () => api.get('/reports') };
 export const aiApi = {
   insights: () => api.get('/ai/insights'),
   monthlyReport: (month) => api.get(`/ai/monthly-report${month ? `?month=${month}` : ''}`),
+};
+
+// ---- Ask AI: persisted conversations, shared with the mobile app (same
+// backend, same Supabase project — a conversation started on one client is
+// immediately visible to the other) ----
+export const assistantApi = {
+  createConversation: (title) => api.post('/ai/conversations', title ? { title } : {}),
+  listConversations: (search) => api.get(`/ai/conversations${search ? `?search=${encodeURIComponent(search)}` : ''}`),
+  listMessages: (conversationId, before) => api.get(`/ai/conversations/${conversationId}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  sendMessage: (conversationId, { message, intentId, args }) => api.post(`/ai/conversations/${conversationId}/messages`, { message, intentId, args }),
+  renameConversation: (conversationId, title) => api.patch(`/ai/conversations/${conversationId}`, { title }),
+  deleteConversation: (conversationId) => api.delete(`/ai/conversations/${conversationId}`),
 };
 
 // ---- dashboard layout (custom widget grid, synced across devices) ----

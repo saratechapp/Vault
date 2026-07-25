@@ -53,7 +53,7 @@ function recommendationFromImprove(factorName, improve) {
       return {
         id: 'improve_bill_payment', priority: 2,
         title: 'Reduce late bill payments',
-        body: `You've had ${improve.latePaymentCount} late payment(s) recently — consider autopay for recurring bills.`,
+        body: `You've had ${improve.latePaymentCount} late payment(s) recently — consider setting a reminder a few days before each bill is due so you can pay it on time.`,
         action: { kind: 'link', label: 'View bills', to: '/app/bills' },
       };
     default:

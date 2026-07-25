@@ -15,7 +15,6 @@ vi.mock('../../lib/api.js', async (importOriginal) => {
       list: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
-      run: vi.fn(),
       remove: vi.fn(),
     },
     categoriesApi: { ...actual.categoriesApi, list: vi.fn() },
@@ -46,7 +45,7 @@ function makeBill(overrides = {}) {
   return {
     id: 'bill1', name: 'Rent', type: 'expense', amount: 100, category: 'Rent', categoryId: 'cat1',
     dueDate: daysFromNow(0), frequency: 'monthly', vendor: '', paymentMethod: 'Bank Transfer', note: '',
-    labels: ['Expenditure'], autoPost: false, active: true, autopay: false, status: 'pending',
+    labels: ['Expenditure'], active: true, status: 'pending',
     accountId: 'acc1', fromAccountId: 'acc1', toAccountId: 'acc2',
     ...overrides,
   };
@@ -234,5 +233,47 @@ describe('Bills page — Add bill modal validation', () => {
         status: 'pending',
       })
     );
+  });
+});
+
+describe('Bills page — Mark as paid confirmation flow', () => {
+  it('opens a confirmation modal and calls billsApi.update with the paid* payload on confirm', async () => {
+    const user = userEvent.setup();
+    billsApi.list.mockResolvedValue([makeBill()]);
+    billsApi.update.mockResolvedValue({ postedTransaction: { id: 'txn1' } });
+    render(<Bills />);
+    await screen.findByText('Rent');
+
+    await user.click(screen.getByRole('button', { name: 'Mark as paid' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Mark as paid')).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Mark as Paid' }));
+
+    await waitFor(() => expect(billsApi.update).toHaveBeenCalledTimes(1));
+    expect(billsApi.update).toHaveBeenCalledWith(
+      'bill1',
+      expect.objectContaining({
+        status: 'paid',
+        paidDate: expect.any(String),
+        paidPaymentMethod: 'Bank Transfer',
+        paidNote: '',
+        paidAccountId: 'acc1',
+      })
+    );
+  });
+
+  it('does not call billsApi.update when the confirmation modal is cancelled', async () => {
+    const user = userEvent.setup();
+    billsApi.list.mockResolvedValue([makeBill()]);
+    render(<Bills />);
+    await screen.findByText('Rent');
+
+    await user.click(screen.getByRole('button', { name: 'Mark as paid' }));
+    const dialog = await screen.findByRole('dialog');
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    expect(billsApi.update).not.toHaveBeenCalled();
   });
 });

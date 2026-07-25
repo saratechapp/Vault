@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import CalendarPage from '../Calendar.jsx';
-import { transactionsApi, categoriesApi, accountsApi } from '../../lib/api.js';
+import { transactionsApi, categoriesApi, accountsApi, billsApi } from '../../lib/api.js';
 
 // `globals: false` (see vite.config.js) means @testing-library/react's
 // auto-cleanup-after-each never registers, so every render here must be
@@ -15,8 +16,15 @@ vi.mock('../../lib/api.js', async () => {
     transactionsApi: { list: vi.fn() },
     categoriesApi: { list: vi.fn() },
     accountsApi: { list: vi.fn() },
+    billsApi: { list: vi.fn() },
   };
 });
+
+// CalendarPage navigates to the Bills page when a bill-due entry is tapped
+// (useNavigate), which throws outside a Router context.
+function renderCalendar() {
+  return render(<CalendarPage />, { wrapper: MemoryRouter });
+}
 
 describe('Calendar page (smoke)', () => {
   beforeEach(() => {
@@ -30,6 +38,7 @@ describe('Calendar page (smoke)', () => {
     transactionsApi.list.mockResolvedValue([]);
     categoriesApi.list.mockResolvedValue([]);
     accountsApi.list.mockResolvedValue([]);
+    billsApi.list.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -37,14 +46,14 @@ describe('Calendar page (smoke)', () => {
   });
 
   it('renders 35 day cells for July 2026 (a month starting on a Wednesday)', async () => {
-    render(<CalendarPage />);
+    renderCalendar();
     // July 1 2026 is a Wednesday -> 3 leading + 31 in-month + 1 trailing = 35
     const dayButtons = await screen.findAllByRole('button', { name: /^(\d{1,2})$/ });
     expect(dayButtons).toHaveLength(35);
   });
 
   it('renders the month header label for the fixed system date', async () => {
-    render(<CalendarPage />);
+    renderCalendar();
     expect(await screen.findByText('July 2026')).toBeInTheDocument();
   });
 });

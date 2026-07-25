@@ -88,6 +88,23 @@
     @apply border border-line-strong backdrop-blur-lg;
     background: linear-gradient(180deg, rgb(var(--tint) / 0.06), rgb(var(--tint) / 0.02));
   }
+  /* .glass's tint-based background is a %-of-black/white overlay — in dark
+     mode --tint is white, so it renders as a barely-there 4%/1.5% white
+     wash over the page's own dark gradient instead of a real card surface
+     (unlike .card/.card-strong below, which switch to a solid --surface
+     color under html.dark). Giving it the same solid-surface + shadow
+     treatment here is what makes dashboard account cards read as premium
+     dark cards instead of washed-out glass in dark mode specifically. */
+  html.dark .glass {
+    background: rgb(var(--surface) / 0.7);
+    border-color: rgb(var(--line-strong));
+    box-shadow: 0 8px 30px -12px rgba(0, 0, 0, 0.4);
+  }
+  html.dark .glass-strong {
+    background: rgb(var(--surface) / 0.85);
+    border-color: rgb(var(--line-strong));
+    box-shadow: 0 8px 30px -12px rgba(0, 0, 0, 0.4);
+  }
 
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-tint/[0.04] px-2.5 py-1 text-xs font-medium;
