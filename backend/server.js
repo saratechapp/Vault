@@ -38,6 +38,8 @@ const { upcomingBills, computeBillPaymentHistory } = require('./services/billAna
 const { mkNotif, computeGeneratedRows, generateNotificationsFor } = require('./services/notificationEngine');
 const { computeDailySummary, computeMonthlyAIReport, computeWeeklySummary } = require('./services/financialInsightsService');
 const { buildRecommendations } = require('./services/recommendationEngine');
+const { computeAiInsightsBundle } = require('./services/aiInsightsBundle');
+const assistantEngine = require('./services/assistantEngine');
 const insightsCache = require('./services/cache');
 
 const PORT = process.env.PORT || 4000;
@@ -1094,6 +1096,17 @@ app.delete('/api/bills/:id', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Read-only history of a bill's past paid cycles (bill_payments), powering
+// the "View Payment History" action on both apps' Payment Details UI.
+app.get('/api/bills/:id/payments', requireAuth, (req, res) => {
+  const bill = req.userData.bills.find((b) => b.id === req.params.id);
+  if (!bill) return res.status(404).json({ error: 'not_found' });
+  const payments = req.userData.billPayments
+    .filter((p) => p.billId === req.params.id)
+    .sort((a, b) => new Date(b.paidDate) - new Date(a.paidDate));
+  sendJSON(req, res, payments);
+});
+
 // ---- goals ----
 // Keeps a linked goal's `saved` in sync when its contribution transaction is
 // edited or deleted. Applies a delta, never a full recompute — `saved` can
@@ -1384,62 +1397,7 @@ app.get('/api/ai/insights', requireAuth, requireFeature('canUseAIInsights'), ah(
   // Metering above counts the request regardless of cache outcome — a cache
   // hit still consumed the user's daily AI-request allowance, since the
   // limit is about API usage, not compute cost.
-  const bundle = await insightsCache.getOrCompute(req.userId, 'ai-insights', async () => {
-    const userData = req.userData;
-    const accounts = computeAccounts(userData);
-    const metrics = buildMetrics(userData, accounts);
-    const cashFlow = computeCashFlowForecast(userData, accounts);
-    const budgetPredictions = computeBudgetPredictions(userData);
-    const smartSavings = computeSmartSavings(userData, accounts);
-    const patterns = computeRecurringPatterns(userData.transactions, userData.categories);
-    const duplicates = computeDuplicateAlerts(userData.transactions);
-    const recurringVendors = new Set(patterns.map((p) => p.vendor.trim().toLowerCase()));
-    const anomalies = computeAnomalies(userData.transactions, recurringVendors);
-    const spendingInsights = computeSpendingInsights(userData);
-    const goalInsights = computeGoalInsights(userData);
-    const dailySummary = computeDailySummary(userData, accounts, metrics, smartSavings, patterns, duplicates, anomalies);
-    const unusedBudgets = computeUnusedBudgets(userData);
-    const largeExpenses = computeLargeExpenseAlerts(userData);
-    const lowBalanceAlert = computeLowBalanceAlert(userData, accounts);
-    const requiredMonthlyContribution = computeRequiredMonthlyContribution(userData);
-    // Reuses the same cached 'health' entry GET /api/dashboard populates —
-    // one health-score computation shared across both endpoints, not a
-    // second copy.
-    const health = await insightsCache.getOrCompute(req.userId, 'health', () => computeHealth(userData, accounts));
-    return {
-      dailySummary,
-      cashFlow,
-      budgetPredictions,
-      smartSavings,
-      subscriptions: patterns.filter((p) => p.isSubscription),
-      recurring: patterns.filter((p) => !p.isSubscription),
-      duplicates,
-      anomalies,
-      spendingInsights,
-      goalInsights,
-      // ---- additive fields below: Financial Insights Engine expansion ----
-      weeklySummary: computeWeeklySummary(userData, accounts),
-      largeExpenses,
-      unusedBudgets,
-      budgetAdjustments: recommendBudgetAdjustments(userData),
-      yearOverYear: computeYearOverYear(userData, accounts),
-      averageDailySpending: computeAverageDailySpending(userData),
-      averageMonthlySavings: computeAverageMonthlySavings(userData, accounts),
-      weekendVsWeekday: computeWeekendVsWeekday(userData),
-      monthlyExtremes: computeMostAndLeastExpensiveMonth(userData, accounts),
-      topSpendingCategories: computeTopSpendingCategories(userData, { n: 5 }),
-      topMerchants: computeTopMerchants(userData),
-      goalCompletionForecast: computeGoalCompletionForecast(userData),
-      requiredMonthlyContribution,
-      lowBalanceAlert,
-      billPaymentHistory: computeBillPaymentHistory(userData),
-      upcomingBills30: upcomingBills(userData, { days: 30 }),
-      recommendations: buildRecommendations({
-        health, budgetPredictions, unusedBudgets, spendingInsights, largeExpenses,
-        smartSavings, lowBalanceAlert, goalForecasts: requiredMonthlyContribution,
-      }),
-    };
-  });
+  const bundle = await computeAiInsightsBundle(req.userId, req.userData, computeAccounts(req.userData));
   sendJSON(req, res, bundle);
 }));
 
@@ -1461,6 +1419,77 @@ app.get('/api/ai/monthly-report', requireAuth, requireFeature('canUseAIReports')
     return computeMonthlyAIReport(userData, accounts, year, month - 1);
   });
   sendJSON(req, res, report);
+}));
+
+// ---- Ask AI: persisted conversations + rule-based chat engine ----
+// Same requireAuth/requireFeature/ai_usage metering as the two AI routes
+// above, reused verbatim — a chat send is metered exactly like an AI
+// Insights fetch, so it can't blow through plan limits by a different rule.
+app.post('/api/ai/conversations', requireAuth, ah(async (req, res) => {
+  const title = req.body && req.body.title;
+  const conversation = await db.insertConversation(req.userId, title ? { title } : {});
+  res.status(201).json(conversation);
+}));
+
+app.get('/api/ai/conversations', requireAuth, ah(async (req, res) => {
+  const conversations = await db.listConversations(req.userId, { search: req.query.search });
+  sendJSON(req, res, conversations);
+}));
+
+app.get('/api/ai/conversations/:id/messages', requireAuth, ah(async (req, res) => {
+  const conversation = await db.getConversation(req.userId, req.params.id);
+  if (!conversation) return res.status(404).json({ error: 'not found' });
+  const messages = await db.listMessages(req.userId, req.params.id, { before: req.query.before, limit: Number(req.query.limit) || 50 });
+  sendJSON(req, res, messages);
+}));
+
+app.patch('/api/ai/conversations/:id', requireAuth, ah(async (req, res) => {
+  const title = (req.body && req.body.title || '').trim();
+  if (!title) return res.status(400).json({ error: 'title is required' });
+  const updated = await db.updateConversation(req.userId, req.params.id, { title });
+  if (!updated) return res.status(404).json({ error: 'not found' });
+  res.json(updated);
+}));
+
+app.delete('/api/ai/conversations/:id', requireAuth, ah(async (req, res) => {
+  await db.deleteConversation(req.userId, req.params.id);
+  res.status(204).end();
+}));
+
+app.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('canUseAIInsights'), ah(async (req, res) => {
+  const conversation = await db.getConversation(req.userId, req.params.id);
+  if (!conversation) return res.status(404).json({ error: 'not found' });
+  const message = (req.body && req.body.message || '').trim();
+  if (!message && !req.body?.intentId) return res.status(400).json({ error: 'message is required' });
+
+  const usedToday = await db.getAiUsageToday(req.userId);
+  if (usedToday >= plans.limitFor(req.userPlan, 'aiRequestsPerDay')) {
+    return res.status(403).json({ error: 'upgrade_required', limit: 'aiRequestsPerDay' });
+  }
+  await db.incrementAiUsage(req.userId);
+
+  await db.insertMessage(req.userId, req.params.id, { role: 'user', content: message, metadata: null });
+
+  const profile = await db.getProfile(req.userId);
+  const response = await assistantEngine.answer({
+    userId: req.userId,
+    userData: req.userData,
+    currencySymbol: profile?.currencySymbol,
+    message,
+    intentId: req.body?.intentId,
+    args: req.body?.args,
+  });
+  const fallbackText = response.text || [response.heading, response.headingValue].filter(Boolean).join(': ') || 'Here you go.';
+  const assistantMessage = await db.insertMessage(req.userId, req.params.id, { role: 'assistant', content: fallbackText, metadata: response });
+
+  // Auto-titles the conversation from the first real user message — only
+  // while it's still sitting at the insertConversation default, so a
+  // rename never gets silently overwritten by a later message in the
+  // same thread.
+  const nextTitle = conversation.title === 'New conversation' ? message.slice(0, 60) : undefined;
+  await db.touchConversation(req.userId, req.params.id, nextTitle ? { title: nextTitle } : undefined);
+
+  res.status(201).json(assistantMessage);
 }));
 
 // ---- 404 + error handling (must be last) ----

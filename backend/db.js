@@ -60,6 +60,17 @@ const BILL_PAYMENT_FIELDS = [
   ['id', 'id'], ['bill_id', 'billId'], ['transaction_id', 'transactionId'],
   ['due_date_at_payment', 'dueDateAtPayment'], ['paid_date', 'paidDate'], ['was_late', 'wasLate'],
 ];
+// Ask AI conversations/messages (see 0018_ai_conversations.sql) — not part of
+// getUserBundle since they aren't financial data the analytics services read;
+// fetched on demand by the /api/ai/conversations* routes instead.
+const CONVERSATION_FIELDS = [
+  ['id', 'id'], ['title', 'title'], ['created_at', 'createdAt'],
+  ['updated_at', 'updatedAt'], ['last_message_at', 'lastMessageAt'],
+];
+const MESSAGE_FIELDS = [
+  ['id', 'id'], ['conversation_id', 'conversationId'], ['role', 'role'],
+  ['content', 'content'], ['metadata', 'metadata'], ['created_at', 'createdAt'],
+];
 
 async function fetchAll(table, userId) {
   const { data, error } = await supabase.from(table).select('*').eq('user_id', userId);
@@ -132,6 +143,7 @@ const billHelpers = makeEntityHelpers('bills', BILL_FIELDS);
 const goalHelpers = makeEntityHelpers('goals', GOAL_FIELDS);
 const debtHelpers = makeEntityHelpers('debts', DEBT_FIELDS);
 const templateHelpers = makeEntityHelpers('templates', TEMPLATE_FIELDS);
+const conversationHelpers = makeEntityHelpers('ai_conversations', CONVERSATION_FIELDS);
 
 async function insertBillPayment(userId, data) {
   const row = camelToSnakePatch(data, BILL_PAYMENT_FIELDS);
@@ -230,6 +242,51 @@ async function incrementAiUsage(userId) {
   return next;
 }
 
+// ---------------------------------------------------------------------------
+// Ask AI conversations/messages — see 0018_ai_conversations.sql. Conversation
+// list has no pagination (matches every other list endpoint in this codebase
+// — a user's conversation count is small); messages use a real before/limit
+// cursor since a single conversation can accumulate hundreds of rows.
+// ---------------------------------------------------------------------------
+async function listConversations(userId, { search } = {}) {
+  let q = supabase.from('ai_conversations').select('*').eq('user_id', userId).order('last_message_at', { ascending: false });
+  if (search) q = q.ilike('title', `%${search}%`);
+  const { data, error } = await q;
+  if (error) throw error;
+  return rowsToCamel(data, CONVERSATION_FIELDS);
+}
+async function getConversation(userId, id) {
+  const { data, error } = await supabase.from('ai_conversations').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+  if (error) throw error;
+  return data ? rowToCamel(data, CONVERSATION_FIELDS) : null;
+}
+// Oldest-first (reversed after the descending/limited fetch) so callers can
+// render straight into a message list without re-sorting.
+async function listMessages(userId, conversationId, { before, limit = 50 } = {}) {
+  let q = supabase.from('ai_messages').select('*').eq('user_id', userId).eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false }).limit(limit);
+  if (before) q = q.lt('created_at', before);
+  const { data, error } = await q;
+  if (error) throw error;
+  return rowsToCamel(data, MESSAGE_FIELDS).reverse();
+}
+async function insertMessage(userId, conversationId, { role, content, metadata }) {
+  const row = { user_id: userId, conversation_id: conversationId, role, content, metadata: metadata ?? null };
+  const { data, error } = await supabase.from('ai_messages').insert(row).select().single();
+  if (error) throw error;
+  return rowToCamel(data, MESSAGE_FIELDS);
+}
+// Bumps last_message_at/updated_at on every send; also applied as the
+// auto-title the first time a conversation gets a real message (title is
+// still the 'New conversation' default up to that point).
+async function touchConversation(userId, conversationId, { title } = {}) {
+  const patch = { updated_at: new Date().toISOString(), last_message_at: new Date().toISOString() };
+  if (title !== undefined) patch.title = title;
+  const { data, error } = await supabase.from('ai_conversations').update(patch).eq('id', conversationId).eq('user_id', userId).select().maybeSingle();
+  if (error) throw error;
+  return data ? rowToCamel(data, CONVERSATION_FIELDS) : null;
+}
+
 module.exports = {
   getUserBundle,
   getBills,
@@ -242,6 +299,11 @@ module.exports = {
   insertBillPayment,
   getAiUsageToday,
   incrementAiUsage,
+  listConversations,
+  getConversation,
+  listMessages,
+  insertMessage,
+  touchConversation,
   insertCategory: categoryHelpers.insert, updateCategory: categoryHelpers.update, deleteCategory: categoryHelpers.remove,
   insertAccount: accountHelpers.insert, updateAccount: accountHelpers.update, deleteAccount: accountHelpers.remove,
   insertTransaction: transactionHelpers.insert, updateTransaction: transactionHelpers.update, deleteTransaction: transactionHelpers.remove,
@@ -250,6 +312,7 @@ module.exports = {
   insertGoal: goalHelpers.insert, updateGoal: goalHelpers.update, deleteGoal: goalHelpers.remove,
   insertDebt: debtHelpers.insert, updateDebt: debtHelpers.update, deleteDebt: debtHelpers.remove,
   insertTemplate: templateHelpers.insert, updateTemplate: templateHelpers.update, deleteTemplate: templateHelpers.remove,
+  insertConversation: conversationHelpers.insert, updateConversation: conversationHelpers.update, deleteConversation: conversationHelpers.remove,
   // Exported so adminDb.js's cross-user listUsers() can map `profiles` rows
   // with the exact same field convention instead of duplicating it.
   PROFILE_FIELDS,

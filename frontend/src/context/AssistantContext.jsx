@@ -69,6 +69,11 @@ export function AssistantProvider({ children }) {
       const response = await provider.current.answer({ message, intentId, args });
       setMessages((prev) => [...prev, { id: nextId(), role: 'assistant', response, timestamp: Date.now() }]);
       setLastUpdatedAt(Date.now());
+    } catch (err) {
+      const text = err?.message === 'upgrade_required'
+        ? "You've hit today's AI request limit for your plan. Upgrade or try again tomorrow."
+        : 'Something went wrong — please try again.';
+      setMessages((prev) => [...prev, { id: nextId(), role: 'assistant', response: { icon: 'AlertTriangle', tone: 'danger', text }, timestamp: Date.now() }]);
     } finally {
       setIsThinking(false);
     }
