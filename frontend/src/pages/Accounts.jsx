@@ -20,14 +20,21 @@ const TYPES = [
 ];
 
 function blankForm(currency) {
-  return { name: '', type: 'bank', openingBalance: '', color: CATEGORY_COLORS[0], icon: 'Landmark', institution: '', currency };
+  return { name: '', type: 'bank', openingBalance: '', color: CATEGORY_COLORS[0], icon: 'Landmark', institution: '', currency, isPrimary: false };
 }
 
-function AccountModal({ open, onClose, editing, onSaved }) {
+function AccountModal({ open, onClose, editing, hasAccounts, onSaved }) {
   const [form, setForm] = useState(blankForm());
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const prefs = readPrefs();
+
+  // Only one account can ever be primary. The checkbox is locked on whenever
+  // unchecking it here would leave zero primary accounts — the very first
+  // account ever added, or the account that currently holds the flag — since
+  // the only way to move primary off an account is to mark a different one
+  // primary instead (mirrors the backend's must_have_primary rejection).
+  const lockedPrimary = editing ? !!editing.isPrimary : !hasAccounts;
 
   useEffect(() => {
     if (!open) return;
@@ -36,9 +43,10 @@ function AccountModal({ open, onClose, editing, onSaved }) {
       setForm({
         name: editing.name, type: editing.type, openingBalance: String(editing.openingBalance),
         color: editing.color, icon: editing.icon, institution: editing.institution || '', currency: editing.currency || prefs.currency,
+        isPrimary: !!editing.isPrimary,
       });
     } else {
-      setForm(blankForm(prefs.currency));
+      setForm({ ...blankForm(prefs.currency), isPrimary: !hasAccounts });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editing]);
@@ -119,6 +127,23 @@ function AccountModal({ open, onClose, editing, onSaved }) {
         <Field label="Icon">
           <IconPicker value={form.icon} onChange={(name) => setForm((f) => ({ ...f, icon: name }))} color={form.color} />
         </Field>
+        <label className={`flex items-start gap-2.5 rounded-xl border border-line p-3 text-sm ${lockedPrimary ? 'opacity-70' : 'cursor-pointer hover:bg-tint/[0.05]'}`}>
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={form.isPrimary}
+            disabled={lockedPrimary}
+            onChange={(e) => setForm((f) => ({ ...f, isPrimary: e.target.checked }))}
+          />
+          <span>
+            <span className="block font-medium text-fg">Primary account</span>
+            <span className="block text-xs text-muted">
+              {lockedPrimary
+                ? (editing ? 'To change this, set another account as primary instead.' : 'Your first account is automatically primary.')
+                : 'Only one account can be primary. Checking this will unset your current primary account.'}
+            </span>
+          </span>
+        </label>
         <div className="grid grid-cols-2 gap-3 pt-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
           <Button type="submit" disabled={submitting}>{editing ? 'Save changes' : 'Add account'}</Button>
@@ -136,6 +161,7 @@ export default function Accounts() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [showCreatePrompt] = useState(() => peekCreateAccountPrompt());
+  const [settingPrimaryId, setSettingPrimaryId] = useState(null);
 
   async function load() {
     setLoadError('');
@@ -165,6 +191,23 @@ export default function Accounts() {
       notifyAccountsChanged();
     } catch (err) {
       alert(err.message || 'Could not delete this account.');
+    }
+  }
+
+  // Quick-toggle from the account card, no need to open Edit. Only ever fires
+  // for a non-primary account (its checkbox is disabled once checked) — moving
+  // primary here unsets whichever account held it before, same one-primary
+  // invariant the Add/Edit modal and backend both enforce.
+  async function handleSetPrimary(id) {
+    setSettingPrimaryId(id);
+    try {
+      await accountsApi.update(id, { isPrimary: true });
+      await load();
+      notifyAccountsChanged();
+    } catch (err) {
+      alert(err.message || 'Could not set this account as primary.');
+    } finally {
+      setSettingPrimaryId(null);
     }
   }
 
@@ -219,10 +262,25 @@ export default function Accounts() {
                   <IconButton icon={Trash2} variant="danger" label="Delete" title="Delete" onClick={() => setConfirmDelete(a)} />
                 </div>
               </div>
-              <Link to={`/app/accounts/${a.id}`} className="relative mt-3 block font-display text-base font-semibold text-fg transition hover:text-brand-500">
+              <Link to={`/app/accounts/${a.id}`} className="relative mt-3 flex items-center gap-2 font-display text-base font-semibold text-fg transition hover:text-brand-500">
                 {a.name}
+                {a.isPrimary && (
+                  <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-500">Primary</span>
+                )}
               </Link>
               <p className="relative text-xs text-subtle">{a.institution || a.type}</p>
+              <label
+                className={`relative mt-2 flex w-fit items-center gap-1.5 text-xs ${a.isPrimary ? 'text-brand-500' : 'text-muted hover:text-fg'} ${a.isPrimary ? '' : 'cursor-pointer'}`}
+                title={a.isPrimary ? 'To change this, set another account as primary.' : 'Set as your primary account'}
+              >
+                <input
+                  type="checkbox"
+                  checked={a.isPrimary}
+                  disabled={a.isPrimary || settingPrimaryId === a.id}
+                  onChange={() => handleSetPrimary(a.id)}
+                />
+                {a.isPrimary ? 'Primary account' : 'Set as primary'}
+              </label>
               <p className={`relative mt-3 font-display text-2xl font-bold ${a.balance < 0 ? 'text-rose-500' : 'text-fg'}`}>{formatCurrency(a.balance)}</p>
               {a.lastTransactionDate && (
                 <p className="relative mt-1 text-xs text-subtle">
@@ -239,7 +297,7 @@ export default function Accounts() {
         </div>
       )}
 
-      <AccountModal open={modalOpen} onClose={() => setModalOpen(false)} editing={editing} onSaved={() => { load(); notifyAccountsChanged(); }} />
+      <AccountModal open={modalOpen} onClose={() => setModalOpen(false)} editing={editing} hasAccounts={accounts.length > 0} onSaved={() => { load(); notifyAccountsChanged(); }} />
 
       <ConfirmDialog
         open={!!confirmDelete}

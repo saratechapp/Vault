@@ -518,7 +518,7 @@ const RULES = [
   { id: 'findDuplicates', test: (l) => /duplicate|unusual/.test(l) },
   { id: 'largestExpenses', test: (l) => /largest expense/.test(l) },
   { id: 'upcomingRecurring', test: (l) => /subscription/.test(l) || /recurring/.test(l) },
-  { id: 'billsDueSoon', test: (l) => /(bills?.*(due|soon))|what bills/.test(l) },
+  { id: 'billsDueSoon', test: (l) => /(bills?.*(due|soon))|what bills|upcoming bills?|upcoming payments?|payments? due|due payments?|any payments?/.test(l) },
   { id: 'overBudget', test: (l) => /over budget|budget.*over|budget recommendation|overspending|analy[sz]e.*budget|budget analysis/.test(l) },
   { id: 'whyExpensesIncreased', test: (l) => /why.*(expense|spending).*(increase|up|higher)|expenses increase/.test(l) },
   { id: 'savingsGoals', test: (l) => /saving(s)? goal/.test(l) },
@@ -535,7 +535,7 @@ const RULES = [
   // Rather than a bare "I don't understand" for any message that's clearly
   // finance-related but doesn't match a specific pattern, fall through to
   // the general spending breakdown — a relevant answer beats a dead end.
-  { id: 'whereDidMoneyGo', test: (l) => /spend|expense|budget|money|financ/.test(l) },
+  { id: 'whereDidMoneyGo', test: (l) => /spend|expense|budget|money|financ|payment|\bbill|income|saving|goal|debt|account|transaction|balance|recurring|subscription|categor/.test(l) },
 ];
 
 function matchIntent(text) {
@@ -552,12 +552,12 @@ function matchIntent(text) {
 // stay in sync with what the engine can actually answer.
 const SUGGESTED_QUESTIONS = [
   { label: 'Analyze my spending', intentId: 'whereDidMoneyGo' },
-  { label: 'How can I save more money?', intentId: 'howToSaveMore' },
-  { label: 'Show unusual expenses', intentId: 'findDuplicates' },
-  { label: 'Budget recommendations', intentId: 'overBudget' },
-  { label: 'Monthly financial summary', intentId: 'monthlySummary' },
+  { label: 'Monthly budget summary', intentId: 'monthlySummary' },
+  { label: 'How can I save more?', intentId: 'howToSaveMore' },
+  { label: 'Upcoming bills', intentId: 'billsDueSoon' },
+  { label: 'Top spending categories', intentId: 'topCategories' },
   { label: 'Compare this month vs last month', intentId: 'compareMonths' },
-  { label: 'Spending by category', intentId: 'topCategories' },
+  { label: 'Spending trends', intentId: 'whereDidMoneyGo' },
   { label: 'Subscription analysis', intentId: 'upcomingRecurring' },
 ];
 

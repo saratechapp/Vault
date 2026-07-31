@@ -70,7 +70,11 @@ function computeAccounts(userData) {
 // is scoped to just its own transactions.
 function computeCategories(userData) {
   const { categories, transactions } = userData;
-  return categories.map((cat) => {
+  // sortOrder is a mobile Settings-module addition (0021_categories_type_
+  // sort_order.sql); existing rows all default to 0, so pre-existing users
+  // see unchanged (insertion) order until they actually reorder.
+  const ordered = [...categories].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+  return ordered.map((cat) => {
     const childIds = cat.parentId ? [] : categories.filter((c) => c.parentId === cat.id).map((c) => c.id);
     const ids = new Set([cat.id, ...childIds]);
     const ledger = computeLedger(transactions, 0, (t) => (ids.has(t.categoryId) ? Math.abs(t.amount) : null));

@@ -316,6 +316,12 @@ function buildSafeUser(userId, email, profile, impersonation, isAdmin) {
     hasPassword: !!profile?.hasPassword,
     feedbackPromptSnoozedUntil: profile?.feedbackPromptSnoozedUntil ?? null,
     feedbackPromptDisabled: !!profile?.feedbackPromptDisabled,
+    themeMode: profile?.themeMode ?? 'system',
+    language: profile?.language ?? 'en',
+    weekStart: profile?.weekStart ?? 'system',
+    timeFormat: profile?.timeFormat ?? 'system',
+    hapticEnabled: profile?.hapticEnabled ?? true,
+    reminderSettings: profile?.reminderSettings ?? null,
     // Resolved once here from plans.js (the single source of truth) so the
     // frontend never needs its own copy of plan/feature rules. limits uses
     // null (not Infinity — JSON can't represent it) to mean "no limit".
@@ -377,6 +383,53 @@ async function requireAuth(req, res, next) {
       adminDb.isActiveAdmin(req.userId),
     ]);
 
+    // Per-device session revocation (mobile Settings > Security > Sessions,
+    // see 0022_sessions.sql) — a bespoke, backend-enforced gate independent
+    // of Supabase's own session lifecycle, since supabase-js's admin API has
+    // no per-session revoke call (same reason sessionsInvalidatedAt above
+    // exists as a global-cutoff workaround rather than a native one). The
+    // client attaches its stable per-install session id as this header;
+    // requests without it (older app builds, or web, which doesn't have this
+    // concept) simply skip the check — graceful degradation, not a crash.
+    const sessionId = req.headers['x-session-id'] || null;
+    req.sessionId = sessionId;
+    req.currentSession = null;
+    if (sessionId) {
+      try {
+        req.currentSession = await db.getSessionBySessionId(req.userId, sessionId);
+      } catch (err) {
+        // Degrades to "session tracking unavailable" (same as sending no
+        // header at all) rather than 500ing every request in this app —
+        // e.g. 0022_sessions.sql not yet manually applied (see that
+        // migration's own comment on why this can't be applied automatically
+        // in this environment).
+        if (!db.isMissingTableError(err)) throw err;
+      }
+      if (req.currentSession?.revokedAt) {
+        securityLog('device_session_revoked_token_rejected', { userId: req.userId, path: req.path });
+        return res.status(401).json({ error: 'session_revoked' });
+      }
+    }
+    // Email-OTP 2FA step-up gate (see 0023_two_factor_codes.sql) — enforced
+    // here, not just in the UI, so a raw first-factor JWT can't bypass it.
+    // Uses a distinct 403 (not the blanket 401 above) specifically so the
+    // mobile app's "any 401 forces sign-out" interceptor doesn't bounce an
+    // otherwise-valid, mid-2FA session back to the login screen instead of
+    // an OTP-entry screen. Exempted paths: the 2FA endpoints themselves (or
+    // verification could never complete), /api/me (needed to discover
+    // twoFactorEnabled right after login, before a session row may even
+    // exist yet), /api/login-events (registers the session row this gate
+    // depends on), and /api/health.
+    const TWO_FACTOR_EXEMPT_PREFIXES = ['/api/2fa/', '/api/me', '/api/login-events', '/api/health'];
+    if (
+      req.userData.twoFactorEnabled &&
+      req.currentSession &&
+      !req.currentSession.twoFactorVerifiedAt &&
+      !TWO_FACTOR_EXEMPT_PREFIXES.some((p) => req.path.startsWith(p))
+    ) {
+      return res.status(403).json({ error: 'two_factor_required' });
+    }
+
     next();
   } catch (err) {
     next(err);
@@ -410,8 +463,11 @@ function assertUnderLimit(req, res, limitKey, currentCount) {
 }
 
 // ---- health (public) ----
+// `version` is read from package.json (never hardcoded) — mobile's Settings
+// > About screen surfaces it as "API Version" alongside its own app version.
+const { version: API_VERSION } = require('./package.json');
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'wallet-backend', time: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'wallet-backend', time: new Date().toISOString(), version: API_VERSION });
 });
 
 // ---- auth ----
@@ -421,7 +477,13 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/me', requireAuth, ah(async (req, res) => {
   const profile = await db.getProfile(req.userId);
-  res.json({ user: buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin) });
+  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin);
+  // Per-device 2FA step-up state (not part of buildSafeUser's normal shape,
+  // which is user-scoped, not session-scoped) — lets the mobile app decide
+  // whether to hold on the post-login TwoFactorScreen without needing its
+  // own separate tracking of "did I already verify this session".
+  user.twoFactorVerified = !req.userData.twoFactorEnabled || !!req.currentSession?.twoFactorVerifiedAt;
+  res.json({ user });
 }));
 
 app.patch('/api/me', requireAuth, ah(async (req, res) => {
@@ -491,6 +553,42 @@ app.patch('/api/me', requireAuth, ah(async (req, res) => {
   if (body.feedbackPromptDisabled !== undefined) {
     patch.feedbackPromptDisabled = !!body.feedbackPromptDisabled;
   }
+  // Personalization/General settings (mobile Settings module Phase 2) — see
+  // 0019/0020_*.sql. Enum-like fields validated here, same convention as
+  // every other text "enum" on this endpoint (currency, country, etc.).
+  if (body.themeMode !== undefined) {
+    if (!['light', 'dark', 'system'].includes(body.themeMode)) {
+      return res.status(400).json({ error: 'themeMode must be light, dark, or system' });
+    }
+    patch.themeMode = body.themeMode;
+  }
+  if (body.language !== undefined) {
+    if (typeof body.language !== 'string' || !/^[a-z]{2}(-[A-Z]{2})?$/.test(body.language)) {
+      return res.status(400).json({ error: 'language must be a 2-letter code, optionally with a region (e.g. "en" or "pt-BR")' });
+    }
+    patch.language = body.language;
+  }
+  if (body.weekStart !== undefined) {
+    if (!['sunday', 'monday', 'saturday', 'system'].includes(body.weekStart)) {
+      return res.status(400).json({ error: 'weekStart must be sunday, monday, saturday, or system' });
+    }
+    patch.weekStart = body.weekStart;
+  }
+  if (body.timeFormat !== undefined) {
+    if (!['12h', '24h', 'system'].includes(body.timeFormat)) {
+      return res.status(400).json({ error: 'timeFormat must be 12h, 24h, or system' });
+    }
+    patch.timeFormat = body.timeFormat;
+  }
+  if (body.hapticEnabled !== undefined) {
+    patch.hapticEnabled = !!body.hapticEnabled;
+  }
+  if (body.reminderSettings !== undefined) {
+    if (body.reminderSettings !== null && typeof body.reminderSettings !== 'object') {
+      return res.status(400).json({ error: 'reminderSettings must be an object or null' });
+    }
+    patch.reminderSettings = body.reminderSettings;
+  }
   const profile = Object.keys(patch).length ? await db.updateProfile(req.userId, patch) : await db.getProfile(req.userId);
   res.json(buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin));
 }));
@@ -517,13 +615,30 @@ app.delete('/api/me', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Deletes every entity row (categories/accounts/transactions/budgets/bills/
+// goals/debts/templates/bill_payments) for the signed-in user WITHOUT
+// deleting the auth user/profile itself — distinct from DELETE /api/me
+// above. Backs the mobile Settings > Data > "Reset Data" irreversible flow
+// (bottom sheet, type RESET to confirm, client then also logs the user out)
+// and doubles as the required precondition for Cloud Backup's Restore (see
+// POST /api/import below) — restore only ever runs against a guaranteed-
+// empty account, so there is no conflict-resolution case to design for.
+app.post('/api/me/reset-data', requireAuth, ah(async (req, res) => {
+  await db.resetUserData(req.userId);
+  bumpCache(req.userId);
+  res.json({ ok: true });
+}));
+
 // ---- feedback (consumer submission -> admin triage inbox) ----
 // 'general_message' covers "Message Super Admin" — a direct message with no
 // bug/feature framing — reusing this same table/category rather than a
 // separate schema, since triage/reply/status all work identically for it.
+// 'translation' backs the mobile Settings > Support > "Help Translate" row —
+// added here plus the two matching label maps in frontend/src/lib/feedback.js
+// and admin/src/pages/Feedback/FeedbackList.jsx (keep all three in sync).
 const FEEDBACK_CATEGORIES = [
   'bug', 'feature_request', 'suggestion', 'complaint', 'performance', 'payment_issue',
-  'ai_assistant', 'voice_entry', 'ui_ux', 'sync_issue', 'security', 'billing', 'general_message', 'other',
+  'ai_assistant', 'voice_entry', 'ui_ux', 'sync_issue', 'security', 'billing', 'translation', 'general_message', 'other',
 ];
 app.post('/api/feedback', requireAuth, ah(async (req, res) => {
   const body = req.body || {};
@@ -603,13 +718,108 @@ app.post('/api/feedback/:id/confirm', requireAuth, ah(async (req, res) => {
 }));
 
 // ---- login events (DAU/MAU, Last Login, Login History, Devices) ----
+// Also upserts this device's row in the new `sessions` table (mobile
+// Settings > Security > Sessions) when the caller sends a sessionId/platform
+// — the web frontend doesn't send these, so it keeps working exactly as
+// before, just without a Sessions-list entry (web has no such screen).
 app.post('/api/login-events', requireAuth, ah(async (req, res) => {
   const method = ['password', 'google', 'impersonation'].includes(req.body?.method) ? req.body.method : 'password';
   const userAgent = req.headers['user-agent'] || null;
   await adminDb.recordLoginEvent({
     userId: req.userId, method, ip: req.ip, userAgent, device: parseDevice(userAgent),
   });
+  const { sessionId, platform, deviceLabel, appVersion } = req.body || {};
+  if (typeof sessionId === 'string' && sessionId) {
+    try {
+      await db.upsertSession(req.userId, { sessionId, platform, deviceLabel, appVersion, ip: req.ip });
+    } catch (err) {
+      // Best-effort, same degradation as requireAuth's own session lookup —
+      // don't fail login itself over the Sessions feature being unavailable.
+      if (!db.isMissingTableError(err)) throw err;
+    }
+  }
   res.status(201).json({ ok: true });
+}));
+
+// ---- sessions (mobile Settings > Security > Sessions — list/revoke a
+// single device, distinct from the blunt "log out everywhere" which is
+// POST /api/auth handled client-side via supabase.auth.signOut({scope:
+// 'global'}) plus sessionsInvalidatedAt) ----
+app.get('/api/sessions', requireAuth, ah(async (req, res) => {
+  const rows = await db.listSessions(req.userId);
+  res.json(rows.map((s) => ({ ...s, current: s.sessionId === req.sessionId })));
+}));
+
+app.delete('/api/sessions/:id', requireAuth, ah(async (req, res) => {
+  const rows = await db.listSessions(req.userId);
+  const target = rows.find((s) => s.id === req.params.id);
+  if (!target) return res.status(404).json({ error: 'not_found' });
+  if (target.sessionId === req.sessionId) {
+    return res.status(400).json({ error: 'cannot_revoke_current_session' });
+  }
+  await db.revokeSession(req.userId, req.params.id);
+  res.json({ ok: true });
+}));
+
+// ---- two-factor authentication (email OTP) ----
+// Bespoke rather than Supabase's native TOTP/phone MFA — Supabase has no
+// native email-OTP factor type, which is specifically what was asked for.
+// Reuses the previously-unenforced profiles.two_factor_enabled column.
+const TWO_FACTOR_CODE_TTL_MS = 10 * 60 * 1000;
+const TWO_FACTOR_MAX_ATTEMPTS = 5;
+function hashTwoFactorCode(code) {
+  return crypto.createHash('sha256').update(code).digest('hex');
+}
+function generateTwoFactorCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+// No email-sending infrastructure exists anywhere in this backend today
+// (password reset goes through Supabase Auth's own email templates, not a
+// backend send path) — this is the one new integration point real 2FA
+// needs. TODO: wire a real transactional-email provider (nodemailer/resend/
+// etc, configured via env vars) once credentials are available; until then
+// the code is logged server-side so the rest of the flow (storage, hashing,
+// expiry, rate-limiting, verification) is fully buildable/testable.
+async function sendTwoFactorEmail(email, code) {
+  console.log(`[2fa] verification code for ${email}: ${code}`);
+}
+const twoFactorLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+app.post('/api/2fa/send-code', requireAuth, twoFactorLimiter, ah(async (req, res) => {
+  const purpose = ['enable', 'login', 'disable'].includes(req.body?.purpose) ? req.body.purpose : 'enable';
+  const code = generateTwoFactorCode();
+  await db.insertTwoFactorCode(req.userId, {
+    codeHash: hashTwoFactorCode(code),
+    purpose,
+    expiresAt: new Date(Date.now() + TWO_FACTOR_CODE_TTL_MS).toISOString(),
+  });
+  await sendTwoFactorEmail(req.userEmail, code);
+  res.status(201).json({ ok: true, expiresInSeconds: TWO_FACTOR_CODE_TTL_MS / 1000 });
+}));
+
+app.post('/api/2fa/verify', requireAuth, twoFactorLimiter, ah(async (req, res) => {
+  const purpose = ['enable', 'login', 'disable'].includes(req.body?.purpose) ? req.body.purpose : 'enable';
+  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'code must be 6 digits' });
+
+  const active = await db.getActiveTwoFactorCode(req.userId, purpose);
+  if (!active || new Date(active.expiresAt).getTime() < Date.now()) {
+    return res.status(400).json({ error: 'code_expired_or_missing' });
+  }
+  if (active.attempts >= TWO_FACTOR_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'too_many_attempts' });
+  }
+  if (active.codeHash !== hashTwoFactorCode(code)) {
+    await db.incrementTwoFactorAttempts(active.id);
+    return res.status(400).json({ error: 'incorrect_code' });
+  }
+  await db.consumeTwoFactorCode(active.id);
+
+  if (purpose === 'enable') await db.updateProfile(req.userId, { twoFactorEnabled: true });
+  if (purpose === 'disable') await db.updateProfile(req.userId, { twoFactorEnabled: false });
+  if (req.sessionId) await db.markSessionTwoFactorVerified(req.userId, req.sessionId);
+
+  res.json({ ok: true });
 }));
 
 // User-initiated "exit impersonation" — the admin-side force-end lives at
@@ -655,24 +865,53 @@ app.put('/api/dashboard-layout', requireAuth, ah(async (req, res) => {
 // ---- categories ----
 app.get('/api/categories', requireAuth, (req, res) => sendJSON(req, res, computeCategories(req.userData)));
 
+const CATEGORY_TYPES = ['income', 'expense', 'transfer'];
 app.post('/api/categories', requireAuth, ah(async (req, res) => {
-  const { name, icon, color, parentId } = req.body || {};
+  const { name, icon, color, parentId, type, sortOrder } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (parentId) {
     const parent = req.userData.categories.find((c) => c.id === parentId);
     if (!parent) return res.status(400).json({ error: 'parent category not found' });
     if (parent.parentId) return res.status(400).json({ error: 'cannot nest under a sub-category' });
   }
-  const cat = await db.insertCategory(req.userId, { name, icon: icon || 'Circle', color: color || '#6366f1', parentId: parentId || null });
+  if (type !== undefined && type !== null && !CATEGORY_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'type must be income, expense, transfer, or null' });
+  }
+  const cat = await db.insertCategory(req.userId, {
+    name, icon: icon || 'Circle', color: color || '#6366f1', parentId: parentId || null,
+    type: type ?? null, sortOrder: Number.isInteger(sortOrder) ? sortOrder : 0,
+  });
   req.userData.categories.push(cat);
   bumpCache(req.userId);
   res.status(201).json(cat);
 }));
 
+// Drag-to-reorder (mobile Category Settings screen) — bulk-writes
+// sort_order for every category the caller owns in one call rather than one
+// PATCH per row. Body: { order: [{id, sortOrder}] }. Registered BEFORE
+// PATCH /api/categories/:id so Express doesn't match "reorder" as an :id.
+app.patch('/api/categories/reorder', requireAuth, ah(async (req, res) => {
+  const order = Array.isArray(req.body?.order) ? req.body.order : null;
+  if (!order || !order.length) return res.status(400).json({ error: 'order must be a non-empty array' });
+  const ownedIds = new Set(req.userData.categories.map((c) => c.id));
+  for (const entry of order) {
+    if (!ownedIds.has(entry?.id) || !Number.isInteger(entry?.sortOrder)) {
+      return res.status(400).json({ error: 'each entry must be {id, sortOrder} for a category you own' });
+    }
+  }
+  await Promise.all(order.map(({ id, sortOrder }) => db.updateCategory(req.userId, id, { sortOrder })));
+  order.forEach(({ id, sortOrder }) => {
+    const cat = req.userData.categories.find((c) => c.id === id);
+    if (cat) cat.sortOrder = sortOrder;
+  });
+  bumpCache(req.userId);
+  res.json(computeCategories(req.userData));
+}));
+
 app.patch('/api/categories/:id', requireAuth, ah(async (req, res) => {
   const cat = req.userData.categories.find((c) => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'not found' });
-  const { name, icon, color, parentId } = req.body || {};
+  const { name, icon, color, parentId, type, sortOrder } = req.body || {};
   if (parentId !== undefined && parentId) {
     if (parentId === cat.id) return res.status(400).json({ error: 'a category cannot be its own parent' });
     const parent = req.userData.categories.find((c) => c.id === parentId);
@@ -681,11 +920,19 @@ app.patch('/api/categories/:id', requireAuth, ah(async (req, res) => {
     const hasChildren = req.userData.categories.some((c) => c.parentId === cat.id);
     if (hasChildren) return res.status(400).json({ error: 'category with sub-categories cannot become a sub-category' });
   }
+  if (type !== undefined && type !== null && !CATEGORY_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'type must be income, expense, transfer, or null' });
+  }
   const patch = {};
   if (name !== undefined) patch.name = name;
   if (icon !== undefined) patch.icon = icon;
   if (color !== undefined) patch.color = color;
   if (parentId !== undefined) patch.parentId = parentId || null;
+  if (type !== undefined) patch.type = type;
+  if (sortOrder !== undefined) {
+    if (!Number.isInteger(sortOrder)) return res.status(400).json({ error: 'sortOrder must be an integer' });
+    patch.sortOrder = sortOrder;
+  }
   Object.assign(cat, patch);
   if (Object.keys(patch).length) await db.updateCategory(req.userId, cat.id, patch);
   bumpCache(req.userId);
@@ -709,10 +956,18 @@ app.delete('/api/categories/:id', requireAuth, ah(async (req, res) => {
 app.get('/api/accounts', requireAuth, (req, res) => sendJSON(req, res, computeAccounts(req.userData)));
 
 app.post('/api/accounts', requireAuth, ah(async (req, res) => {
-  const { name, type, openingBalance, color, icon, currency, institution } = req.body || {};
+  const { name, type, openingBalance, color, icon, currency, institution, isPrimary } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!assertUnderLimit(req, res, 'accounts', req.userData.accounts.length)) return;
-  const acc = await db.insertAccount(req.userId, { name, type: type || 'bank', openingBalance: numOr(openingBalance), color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '' });
+  // A user's very first account is always primary (there'd otherwise be no
+  // primary account at all); after that, primary is opt-in but exclusive —
+  // marking this one primary unsets whichever account held it before.
+  const makePrimary = req.userData.accounts.length === 0 || !!isPrimary;
+  if (makePrimary) {
+    await db.unsetOtherPrimaryAccounts(req.userId);
+    req.userData.accounts.forEach((a) => { a.isPrimary = false; });
+  }
+  const acc = await db.insertAccount(req.userId, { name, type: type || 'bank', openingBalance: numOr(openingBalance), color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '', isPrimary: makePrimary });
   req.userData.accounts.push(acc);
   bumpCache(req.userId);
   res.status(201).json(computeAccounts(req.userData).find((a) => a.id === acc.id));
@@ -721,10 +976,21 @@ app.post('/api/accounts', requireAuth, ah(async (req, res) => {
 app.patch('/api/accounts/:id', requireAuth, ah(async (req, res) => {
   const acc = req.userData.accounts.find((a) => a.id === req.params.id);
   if (!acc) return res.status(404).json({ error: 'not found' });
+  // The only way to move primary off this account is to mark a different one
+  // primary instead — an explicit un-check here would leave the user with no
+  // primary account at all, so it's rejected rather than silently allowed.
+  if (req.body.isPrimary === false && acc.isPrimary) {
+    return res.status(400).json({ error: 'must_have_primary', message: 'Set another account as primary instead of unsetting this one.' });
+  }
   const patch = {};
-  ['name', 'type', 'openingBalance', 'color', 'icon', 'currency', 'institution'].forEach((f) => {
-    if (req.body[f] !== undefined) patch[f] = f === 'openingBalance' ? Number(req.body[f]) : req.body[f];
+  ['name', 'type', 'openingBalance', 'color', 'icon', 'currency', 'institution', 'isPrimary'].forEach((f) => {
+    if (req.body[f] === undefined) return;
+    patch[f] = f === 'openingBalance' ? Number(req.body[f]) : f === 'isPrimary' ? !!req.body[f] : req.body[f];
   });
+  if (patch.isPrimary === true && !acc.isPrimary) {
+    await db.unsetOtherPrimaryAccounts(req.userId, acc.id);
+    req.userData.accounts.forEach((a) => { if (a.id !== acc.id) a.isPrimary = false; });
+  }
   Object.assign(acc, patch);
   if (Object.keys(patch).length) await db.updateAccount(req.userId, acc.id, patch);
   bumpCache(req.userId);
@@ -733,6 +999,7 @@ app.patch('/api/accounts/:id', requireAuth, ah(async (req, res) => {
 
 app.delete('/api/accounts/:id', requireAuth, ah(async (req, res) => {
   const { id } = req.params;
+  const acc = req.userData.accounts.find((a) => a.id === id);
   const inUse =
     req.userData.transactions.some((t) => t.accountId === id || t.fromAccountId === id || t.toAccountId === id) ||
     req.userData.bills.some((b) => b.accountId === id || b.fromAccountId === id || b.toAccountId === id) ||
@@ -740,6 +1007,14 @@ app.delete('/api/accounts/:id', requireAuth, ah(async (req, res) => {
   if (inUse) return res.status(409).json({ error: 'in_use' });
   await db.deleteAccount(req.userId, id);
   req.userData.accounts = req.userData.accounts.filter((a) => a.id !== id);
+  // Deleting the primary account must not leave zero primaries — promote
+  // whichever account is left (arbitrary choice; there's no meaningful
+  // "next" ordering here) so the invariant holds after the delete too.
+  if (acc?.isPrimary && req.userData.accounts.length) {
+    const next = req.userData.accounts[0];
+    await db.updateAccount(req.userId, next.id, { isPrimary: true });
+    next.isPrimary = true;
+  }
   bumpCache(req.userId);
   res.json({ ok: true });
 }));
@@ -906,7 +1181,7 @@ app.get('/api/budgets', requireAuth, (req, res) => {
   const list = req.userData.budgets.map((b) => ({
     ...b,
     category: req.userData.categories.find((c) => c.id === b.categoryId) || null,
-    spent: computeBudgetSpent(b, txns, req.userData.categories),
+    spent: computeBudgetSpent(b, txns, req.userData.categories, req.userData.weekStart),
   }));
   sendJSON(req, res, list);
 });
@@ -1432,6 +1707,11 @@ app.post('/api/ai/conversations', requireAuth, ah(async (req, res) => {
 }));
 
 app.get('/api/ai/conversations', requireAuth, ah(async (req, res) => {
+  // Prunes this user's own conversations older than AI_HISTORY_RETENTION_DAYS
+  // before listing, so history never shows something that's about to
+  // disappear and free-tier storage never grows unbounded (see db.js's
+  // deleteOldConversations for the full rationale).
+  await db.deleteOldConversations(req.userId);
   const conversations = await db.listConversations(req.userId, { search: req.query.search });
   sendJSON(req, res, conversations);
 }));
@@ -1457,6 +1737,13 @@ app.delete('/api/ai/conversations/:id', requireAuth, ah(async (req, res) => {
 }));
 
 app.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('canUseAIInsights'), ah(async (req, res) => {
+  // Same retention prune as the list route above — run before the
+  // conversation lookup, so a conversation whose last message is already
+  // past the retention window is correctly treated as gone (404) rather
+  // than silently accepting a new message into a thread that shouldn't
+  // still exist. An actively-used conversation's last_message_at is always
+  // recent, so this never touches one mid-send.
+  await db.deleteOldConversations(req.userId);
   const conversation = await db.getConversation(req.userId, req.params.id);
   if (!conversation) return res.status(404).json({ error: 'not found' });
   const message = (req.body && req.body.message || '').trim();
@@ -1490,6 +1777,172 @@ app.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('canU
   await db.touchConversation(req.userId, req.params.id, nextTitle ? { title: nextTitle } : undefined);
 
   res.status(201).json(assistantMessage);
+}));
+
+// ---- data export (manual "backup a copy" snapshot, e.g. for the mobile
+// app's Google Drive backup — not a restore/import path, read-only) ----
+app.get('/api/export', requireAuth, ah(async (req, res) => {
+  const profile = await db.getProfile(req.userId);
+  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin);
+  sendJSON(req, res, {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    app: 'vault-wallet',
+    profile: user,
+    // req.userData is already the exact bundle requireAuth fetches on every
+    // request (categories, accounts, transactions, budgets, bills, goals,
+    // debts, templates, billPayments) — no new queries, purely packaging.
+    data: req.userData,
+  });
+}));
+
+// ---- data import (Cloud Backup's "Restore", counterpart to GET /api/export
+// above) ----
+// Deliberately requires the account to be completely empty first (409
+// otherwise) rather than attempting any merge/conflict-resolution — this app
+// has no offline write queue, so there's no real local/remote divergence to
+// reconcile; making Restore only ever run against a guaranteed-empty account
+// (via Reset Data, POST /api/me/reset-data, immediately beforehand) makes a
+// conflict structurally impossible instead of just simplifying one away.
+// Every entity's id is a Postgres-generated UUID that changes on reinsert, so
+// this rebuilds an old-id -> new-id map as it goes and remaps every foreign
+// key (categoryId, accountId, fromAccountId/toAccountId, sourceBillId,
+// sourceDebtId, goalId) before each dependent insert — a naive row-for-row
+// reinsert would silently orphan every one of those references.
+app.post('/api/import', requireAuth, ah(async (req, res) => {
+  const payload = req.body?.data;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'body.data must be an export snapshot (see GET /api/export)' });
+  }
+  const existingCount = await db.countUserData(req.userId);
+  if (existingCount > 0) {
+    return res.status(409).json({ error: 'account_not_empty', message: 'Reset Data before restoring a backup.' });
+  }
+
+  const categoryIdMap = new Map();
+  const accountIdMap = new Map();
+  const billIdMap = new Map();
+  const debtIdMap = new Map();
+  const goalIdMap = new Map();
+  const remap = (map, id) => (id ? (map.get(id) ?? null) : null);
+
+  // Categories first (parentId only ever points at another category) — two
+  // passes so a child's parentId can resolve to an already-remapped parent.
+  const categoriesInput = Array.isArray(payload.categories) ? payload.categories : [];
+  for (const cat of categoriesInput.filter((c) => !c.parentId)) {
+    const created = await db.insertCategory(req.userId, {
+      name: cat.name, icon: cat.icon, color: cat.color, parentId: null, type: cat.type ?? null, sortOrder: cat.sortOrder || 0,
+    });
+    categoryIdMap.set(cat.id, created.id);
+  }
+  for (const cat of categoriesInput.filter((c) => c.parentId)) {
+    const created = await db.insertCategory(req.userId, {
+      name: cat.name, icon: cat.icon, color: cat.color, parentId: remap(categoryIdMap, cat.parentId),
+      type: cat.type ?? null, sortOrder: cat.sortOrder || 0,
+    });
+    categoryIdMap.set(cat.id, created.id);
+  }
+
+  // At most one restored account can come back in as primary — if the
+  // exported snapshot somehow has more than one flagged (shouldn't happen,
+  // but this predates the one-primary-per-user invariant so old exports
+  // aren't guaranteed clean), only the first wins; the rest insert as false
+  // rather than tripping the accounts_one_primary_per_user_idx unique index.
+  // If none of them were primary, the first restored account is promoted so
+  // the invariant still holds afterward.
+  const accountsInput = Array.isArray(payload.accounts) ? payload.accounts : [];
+  let primaryRestored = false;
+  for (const acc of accountsInput) {
+    const isPrimary = !!acc.isPrimary && !primaryRestored;
+    const created = await db.insertAccount(req.userId, {
+      name: acc.name, type: acc.type, openingBalance: acc.openingBalance, color: acc.color, icon: acc.icon,
+      currency: acc.currency, institution: acc.institution, creditLimit: acc.creditLimit, isPrimary,
+    });
+    if (isPrimary) primaryRestored = true;
+    accountIdMap.set(acc.id, created.id);
+  }
+  if (!primaryRestored && accountIdMap.size) {
+    const firstNewId = accountIdMap.values().next().value;
+    await db.updateAccount(req.userId, firstNewId, { isPrimary: true });
+  }
+
+  const goalsInput = Array.isArray(payload.goals) ? payload.goals : [];
+  for (const g of goalsInput) {
+    const created = await db.insertGoal(req.userId, {
+      name: g.name, icon: g.icon, target: g.target, saved: g.saved, deadline: g.deadline, priority: g.priority,
+      color: g.color, monthlyContribution: g.monthlyContribution, note: g.note, accountId: remap(accountIdMap, g.accountId),
+    });
+    goalIdMap.set(g.id, created.id);
+  }
+
+  const debtsInput = Array.isArray(payload.debts) ? payload.debts : [];
+  for (const d of debtsInput) {
+    const created = await db.insertDebt(req.userId, {
+      name: d.name, creditor: d.creditor, balance: d.balance, apr: d.apr, minPayment: d.minPayment, dueDate: d.dueDate,
+    });
+    debtIdMap.set(d.id, created.id);
+  }
+
+  const billsInput = Array.isArray(payload.bills) ? payload.bills : [];
+  for (const b of billsInput) {
+    const created = await db.insertBill(req.userId, {
+      name: b.name, type: b.type, amount: b.amount, dueDate: b.dueDate, frequency: b.frequency, status: b.status,
+      category: b.category, categoryId: remap(categoryIdMap, b.categoryId), vendor: b.vendor, paymentMethod: b.paymentMethod,
+      note: b.note, labels: b.labels, active: b.active, lastRun: b.lastRun,
+      accountId: remap(accountIdMap, b.accountId), fromAccountId: remap(accountIdMap, b.fromAccountId),
+      toAccountId: remap(accountIdMap, b.toAccountId),
+    });
+    billIdMap.set(b.id, created.id);
+  }
+
+  const templatesInput = Array.isArray(payload.templates) ? payload.templates : [];
+  for (const t of templatesInput) {
+    await db.insertTemplate(req.userId, {
+      name: t.name, type: t.type, amount: t.amount, categoryId: remap(categoryIdMap, t.categoryId),
+      accountId: remap(accountIdMap, t.accountId), paymentMethod: t.paymentMethod, vendor: t.vendor, note: t.note,
+    });
+  }
+
+  const transactionsInput = Array.isArray(payload.transactions) ? payload.transactions : [];
+  const transactionIdMap = new Map();
+  for (const t of transactionsInput) {
+    const created = await db.insertTransaction(req.userId, {
+      date: t.date, vendor: t.vendor, categoryId: remap(categoryIdMap, t.categoryId), amount: t.amount, type: t.type,
+      paymentMethod: t.paymentMethod, note: t.note, labels: t.labels, payer: t.payer, paymentStatus: t.paymentStatus,
+      currency: t.currency, accountId: remap(accountIdMap, t.accountId), fromAccountId: remap(accountIdMap, t.fromAccountId),
+      toAccountId: remap(accountIdMap, t.toAccountId), sourceBillId: remap(billIdMap, t.sourceBillId),
+      sourceDebtId: remap(debtIdMap, t.sourceDebtId), goalId: remap(goalIdMap, t.goalId),
+    });
+    transactionIdMap.set(t.id, created.id);
+  }
+
+  const budgetsInput = Array.isArray(payload.budgets) ? payload.budgets : [];
+  for (const b of budgetsInput) {
+    await db.insertBudget(req.userId, {
+      categoryId: remap(categoryIdMap, b.categoryId), limit: b.limit, period: b.period, alertAt: b.alertAt,
+      startDate: b.startDate, endDate: b.endDate,
+    });
+  }
+
+  const billPaymentsInput = Array.isArray(payload.billPayments) ? payload.billPayments : [];
+  for (const bp of billPaymentsInput) {
+    const billId = remap(billIdMap, bp.billId);
+    const transactionId = remap(transactionIdMap, bp.transactionId);
+    if (!billId || !transactionId) continue; // orphaned in the source snapshot — skip rather than fail the whole restore
+    await db.insertBillPayment(req.userId, {
+      billId, transactionId, dueDateAtPayment: bp.dueDateAtPayment, paidDate: bp.paidDate, wasLate: bp.wasLate,
+    });
+  }
+
+  bumpCache(req.userId);
+  res.status(201).json({
+    ok: true,
+    counts: {
+      categories: categoryIdMap.size, accounts: accountIdMap.size, goals: goalIdMap.size, debts: debtIdMap.size,
+      bills: billIdMap.size, templates: templatesInput.length, transactions: transactionIdMap.size,
+      budgets: budgetsInput.length, billPayments: billPaymentsInput.length,
+    },
+  });
 }));
 
 // ---- 404 + error handling (must be last) ----

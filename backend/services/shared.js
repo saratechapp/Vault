@@ -42,21 +42,30 @@ function categoryIdByName(categories, name) {
   return cat ? cat.id : null;
 }
 
-function startOfWeek(date) {
+// `weekStartPref` is the user's profiles.week_start value ('sunday' |
+// 'monday' | 'saturday' | 'system' | undefined) — mobile Settings module
+// Phase 2's Week Start Day setting (see 0019_profile_personalization_fields).
+// Defaults to Monday (this function's original, only-ever behavior) for
+// every caller that doesn't pass one, so this stays behavior-neutral for
+// every existing call site until one is deliberately updated to thread a
+// real user preference through (see server.js's budget routes).
+const WEEK_START_DAY_NUMBER = { sunday: 0, monday: 1, saturday: 6 };
+function startOfWeek(date, weekStartPref) {
+  const startDay = WEEK_START_DAY_NUMBER[weekStartPref] ?? 1;
   const d = new Date(date);
   const day = d.getDay();
-  const diff = (day === 0 ? -6 : 1) - day;
+  const diff = -((day - startDay + 7) % 7);
   d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
   return d;
 }
-function budgetWindow(budget) {
+function budgetWindow(budget, weekStartPref) {
   const now = new Date();
   if (budget.period === 'custom' && budget.startDate) {
     return { start: new Date(budget.startDate), end: budget.endDate ? new Date(budget.endDate) : now };
   }
   if (budget.period === 'weekly') {
-    const start = startOfWeek(now);
+    const start = startOfWeek(now, weekStartPref);
     const end = new Date(start);
     end.setDate(end.getDate() + 6);
     end.setHours(23, 59, 59, 999);
@@ -67,16 +76,16 @@ function budgetWindow(budget) {
   }
   return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59) };
 }
-function budgetTransactionsInWindow(budget, transactions, categories) {
+function budgetTransactionsInWindow(budget, transactions, categories, weekStartPref) {
   const catIds = new Set([budget.categoryId, ...categories.filter((c) => c.parentId === budget.categoryId).map((c) => c.id)]);
-  const { start, end } = budgetWindow(budget);
+  const { start, end } = budgetWindow(budget, weekStartPref);
   return transactions.filter((t) => t.type === 'expense' && catIds.has(t.categoryId)).filter((t) => {
     const d = new Date(t.date);
     return d >= start && d <= end;
   });
 }
-function computeBudgetSpent(budget, transactions, categories) {
-  return budgetTransactionsInWindow(budget, transactions, categories).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+function computeBudgetSpent(budget, transactions, categories, weekStartPref) {
+  return budgetTransactionsInWindow(budget, transactions, categories, weekStartPref).reduce((sum, t) => sum + Math.abs(t.amount), 0);
 }
 
 function categorySpendForMonth(transactions, categories, year, month) {
