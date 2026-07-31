@@ -10,11 +10,12 @@ const { rowToCamel, rowsToCamel, camelToSnakePatch } = require('./lib/supabaseMa
 // ---------------------------------------------------------------------------
 const CATEGORY_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['icon', 'icon'], ['color', 'color'], ['parent_id', 'parentId'],
+  ['type', 'type'], ['sort_order', 'sortOrder'],
 ];
 const ACCOUNT_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['type', 'type'], ['opening_balance', 'openingBalance'],
   ['color', 'color'], ['icon', 'icon'], ['currency', 'currency'], ['institution', 'institution'],
-  ['credit_limit', 'creditLimit'],
+  ['credit_limit', 'creditLimit'], ['is_primary', 'isPrimary'],
 ];
 const TRANSACTION_FIELDS = [
   ['id', 'id'], ['date', 'date'], ['vendor', 'vendor'], ['category_id', 'categoryId'], ['amount', 'amount'], ['type', 'type'],
@@ -52,6 +53,30 @@ const PROFILE_FIELDS = [
   ['sessions_invalidated_at', 'sessionsInvalidatedAt'], ['email', 'email'],
   ['feedback_prompt_snoozed_until', 'feedbackPromptSnoozedUntil'], ['feedback_prompt_disabled', 'feedbackPromptDisabled'],
   ['date_of_birth', 'dateOfBirth'], ['timezone', 'timezone'],
+  ['theme_mode', 'themeMode'], ['language', 'language'], ['week_start', 'weekStart'],
+  ['time_format', 'timeFormat'], ['haptic_enabled', 'hapticEnabled'], ['reminder_settings', 'reminderSettings'],
+];
+// Sessions (mobile Settings > Security > Sessions) — one row per
+// app-install/login, distinct from the append-only `login_events` history
+// table (adminDb.js). See 0022_sessions.sql for why this is a separate table
+// rather than reusing login_events or a Supabase-native session primitive.
+const SESSION_FIELDS = [
+  ['id', 'id'], ['session_id', 'sessionId'], ['platform', 'platform'], ['device_label', 'deviceLabel'],
+  ['app_version', 'appVersion'], ['ip', 'ip'], ['created_at', 'createdAt'], ['last_seen_at', 'lastSeenAt'],
+  ['revoked_at', 'revokedAt'], ['two_factor_verified_at', 'twoFactorVerifiedAt'],
+];
+// Email-OTP codes backing real 2FA (see 0023_two_factor_codes.sql) — never
+// exposes code_hash to callers outside this module.
+const TWO_FACTOR_CODE_FIELDS = [
+  ['id', 'id'], ['purpose', 'purpose'], ['expires_at', 'expiresAt'],
+  ['consumed_at', 'consumedAt'], ['attempts', 'attempts'], ['created_at', 'createdAt'],
+];
+// Every user-owned entity table, in delete order for Reset Data (children
+// before/independent of parents — none of these FK to each other in a way
+// that requires ordering, but bill_payments references bills so it goes
+// first defensively) and the same table list getUserBundle() already reads.
+const RESETTABLE_TABLES = [
+  'bill_payments', 'transactions', 'budgets', 'bills', 'goals', 'debts', 'templates', 'accounts', 'categories',
 ];
 // Payment-time log backing BillAnalysisService's payment-history/late-payment
 // insights (see 0007_bill_payments.sql) — write-once per payment, read via
@@ -91,8 +116,15 @@ async function getUserBundle(userId) {
     fetchAll('bill_payments', userId),
     // `status` included so requireAuth can reject a suspended account on
     // every request, not just at login — a JWT issued before a suspension
-    // doesn't reflect it.
-    supabase.from('profiles').select('dashboard_layout, plan, status, sessions_invalidated_at').eq('id', userId).maybeSingle()
+    // doesn't reflect it. `two_factor_enabled`/`week_start` likewise so
+    // requireAuth's 2FA step-up gate and budget-window computations don't
+    // need a second profile fetch per request. `select('*')` rather than an
+    // explicit column list deliberately — this runs on every single
+    // authenticated request, so it must never hard-fail just because one of
+    // the mobile Settings module's new columns (0019/0020_*.sql) hasn't been
+    // manually applied yet; any column that doesn't exist is just absent
+    // from the returned row, read defensively below via `profileRow?.x`.
+    supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
       .then(({ data, error }) => { if (error) throw error; return data; }),
   ]);
   return {
@@ -106,9 +138,48 @@ async function getUserBundle(userId) {
     templates: rowsToCamel(templates, TEMPLATE_FIELDS),
     billPayments: rowsToCamel(billPayments, BILL_PAYMENT_FIELDS),
     dashboardLayout: profileRow ? profileRow.dashboard_layout : null,
-    plan: profileRow ? profileRow.plan : 'free',
-    status: profileRow ? profileRow.status : 'active',
+    plan: profileRow?.plan ?? 'free',
+    status: profileRow?.status ?? 'active',
+    twoFactorEnabled: !!profileRow?.two_factor_enabled,
+    weekStart: profileRow?.week_start ?? 'system',
   };
+}
+
+// PostgREST reports a column that doesn't exist yet in one of two shapes
+// depending on version: a raw Postgres `42703` (undefined_column) error, or
+// its own schema-cache miss (`PGRST204`, "Could not find the 'x' column of
+// 'table' in the schema cache"). Recognized here so a not-yet-applied
+// migration (e.g. 0021_categories_type_sort_order.sql, still pending a
+// manual apply — see that file's own comment) degrades to "the new field is
+// silently dropped" instead of a hard 500 that blocks the entire insert/
+// update, on every entity, not just categories.
+function isMissingColumnError(error) {
+  return error?.code === '42703' || error?.code === 'PGRST204';
+}
+// Same idea, for a whole table that doesn't exist yet (e.g. 0022_sessions.sql
+// / 0023_two_factor_codes.sql before they've been manually applied) — raw
+// Postgres `42P01` (undefined_table) or PostgREST's own `PGRST205` schema-
+// cache miss. Used by requireAuth's per-request session lookup and the
+// login-events session upsert, both of which must degrade to "session
+// tracking unavailable" rather than 500 on literally every request.
+function isMissingTableError(error) {
+  return error?.code === '42P01' || error?.code === 'PGRST205';
+}
+// Strips whichever of `row`'s own keys the error message actually names, so
+// a genuinely-unrelated column error on a field this row didn't even touch
+// never gets silently swallowed — only ever narrows the payload, never
+// changes which row/id is targeted.
+function stripUnknownColumns(row, error) {
+  const message = error?.message || '';
+  const next = { ...row };
+  let removedAny = false;
+  for (const key of Object.keys(row)) {
+    if (key !== 'user_id' && message.includes(key)) {
+      delete next[key];
+      removedAny = true;
+    }
+  }
+  return removedAny ? next : null;
 }
 
 // Generic per-table insert/update/delete, all scoped to user_id so a caller
@@ -118,13 +189,21 @@ function makeEntityHelpers(table, fields) {
     async insert(userId, data) {
       const row = camelToSnakePatch(data, fields);
       row.user_id = userId;
-      const { data: created, error } = await supabase.from(table).insert(row).select().single();
+      let { data: created, error } = await supabase.from(table).insert(row).select().single();
+      if (error && isMissingColumnError(error)) {
+        const retryRow = stripUnknownColumns(row, error);
+        if (retryRow) ({ data: created, error } = await supabase.from(table).insert(retryRow).select().single());
+      }
       if (error) throw error;
       return rowToCamel(created, fields);
     },
     async update(userId, id, patch) {
       const row = camelToSnakePatch(patch, fields);
-      const { data: updated, error } = await supabase.from(table).update(row).eq('id', id).eq('user_id', userId).select().maybeSingle();
+      let { data: updated, error } = await supabase.from(table).update(row).eq('id', id).eq('user_id', userId).select().maybeSingle();
+      if (error && isMissingColumnError(error)) {
+        const retryRow = stripUnknownColumns(row, error);
+        if (retryRow) ({ data: updated, error } = await supabase.from(table).update(retryRow).eq('id', id).eq('user_id', userId).select().maybeSingle());
+      }
       if (error) throw error;
       return updated ? rowToCamel(updated, fields) : null;
     },
@@ -137,6 +216,19 @@ function makeEntityHelpers(table, fields) {
 
 const categoryHelpers = makeEntityHelpers('categories', CATEGORY_FIELDS);
 const accountHelpers = makeEntityHelpers('accounts', ACCOUNT_FIELDS);
+
+// Clears is_primary on every one of the user's accounts except `keepId` (or
+// all of them, if omitted) — the app-side half of the "exactly one primary
+// account" invariant, called right before a caller marks a different account
+// primary so no two rows are ever true at once (see 0024_accounts_primary.sql
+// for the DB-level partial-unique backstop). Degrades to a no-op if the
+// column isn't migrated yet, same convention as isMissingColumnError elsewhere.
+async function unsetOtherPrimaryAccounts(userId, keepId) {
+  let q = supabase.from('accounts').update({ is_primary: false }).eq('user_id', userId).eq('is_primary', true);
+  if (keepId) q = q.neq('id', keepId);
+  const { error } = await q;
+  if (error && !isMissingColumnError(error)) throw error;
+}
 const transactionHelpers = makeEntityHelpers('transactions', TRANSACTION_FIELDS);
 const budgetHelpers = makeEntityHelpers('budgets', BUDGET_FIELDS);
 const billHelpers = makeEntityHelpers('bills', BILL_FIELDS);
@@ -187,7 +279,15 @@ async function updateProfile(userId, patch) {
   // gap), a plain UPDATE silently touches zero rows and returns null with no
   // error — every caller of updateProfile would then wrongly believe the
   // write succeeded. Upserting makes this self-healing instead.
-  const { data, error } = await supabase.from('profiles').upsert({ id: userId, ...row }).select().maybeSingle();
+  let { data, error } = await supabase.from('profiles').upsert({ id: userId, ...row }).select().maybeSingle();
+  // Same not-yet-migrated-column degradation as makeEntityHelpers (see
+  // isMissingColumnError) — e.g. 0019/0020's new profile columns before
+  // they've been manually applied. Retries with just the unknown fields
+  // dropped rather than failing every profile field in the same PATCH.
+  if (error && isMissingColumnError(error)) {
+    const retryRow = stripUnknownColumns({ id: userId, ...row }, error);
+    if (retryRow) ({ data, error } = await supabase.from('profiles').upsert(retryRow).select().maybeSingle());
+  }
   if (error) throw error;
   return rowToCamel(data, PROFILE_FIELDS);
 }
@@ -287,7 +387,119 @@ async function touchConversation(userId, conversationId, { title } = {}) {
   return data ? rowToCamel(data, CONVERSATION_FIELDS) : null;
 }
 
+// ---------------------------------------------------------------------------
+// sessions — per-device list/revoke (mobile Settings > Security > Sessions).
+// upsertSession is called on every login and (best-effort) periodically, so
+// last_seen_at stays fresh without a separate heartbeat endpoint.
+// ---------------------------------------------------------------------------
+async function upsertSession(userId, { sessionId, platform, deviceLabel, appVersion, ip }) {
+  const row = {
+    user_id: userId, session_id: sessionId, platform: platform || null, device_label: deviceLabel || null,
+    app_version: appVersion || null, ip: ip || null, last_seen_at: new Date().toISOString(),
+  };
+  const { data, error } = await supabase.from('sessions').upsert(row, { onConflict: 'user_id,session_id' }).select().single();
+  if (error) throw error;
+  return rowToCamel(data, SESSION_FIELDS);
+}
+async function listSessions(userId) {
+  const { data, error } = await supabase.from('sessions').select('*').eq('user_id', userId)
+    .is('revoked_at', null).order('last_seen_at', { ascending: false });
+  if (error) throw error;
+  return rowsToCamel(data, SESSION_FIELDS);
+}
+async function getSessionBySessionId(userId, sessionId) {
+  const { data, error } = await supabase.from('sessions').select('*').eq('user_id', userId).eq('session_id', sessionId).maybeSingle();
+  if (error) throw error;
+  return data ? rowToCamel(data, SESSION_FIELDS) : null;
+}
+async function revokeSession(userId, id) {
+  const { error } = await supabase.from('sessions').update({ revoked_at: new Date().toISOString() }).eq('id', id).eq('user_id', userId);
+  if (error) throw error;
+}
+async function markSessionTwoFactorVerified(userId, sessionId) {
+  const { error } = await supabase.from('sessions').update({ two_factor_verified_at: new Date().toISOString() })
+    .eq('user_id', userId).eq('session_id', sessionId);
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------------
+// two-factor email-OTP codes (see 0023_two_factor_codes.sql). code_hash is
+// the only thing ever stored — callers hash before calling insert, and
+// compare hashes on verify, mirroring lib/security/pin.ts's approach.
+// ---------------------------------------------------------------------------
+async function insertTwoFactorCode(userId, { codeHash, purpose, expiresAt }) {
+  const row = { user_id: userId, code_hash: codeHash, purpose, expires_at: expiresAt };
+  const { data, error } = await supabase.from('two_factor_codes').insert(row).select().single();
+  if (error) throw error;
+  return rowToCamel(data, TWO_FACTOR_CODE_FIELDS);
+}
+// Most recent unconsumed, unexpired code for this user/purpose — codes are
+// single-use and short-lived, so there's normally at most one live at a time.
+async function getActiveTwoFactorCode(userId, purpose) {
+  const { data, error } = await supabase.from('two_factor_codes').select('*').eq('user_id', userId).eq('purpose', purpose)
+    .is('consumed_at', null).order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) throw error;
+  return data ? { ...rowToCamel(data, TWO_FACTOR_CODE_FIELDS), codeHash: data.code_hash } : null;
+}
+// Plain read-modify-write, not a DB-level increment — fine given how rarely
+// a single code is verified concurrently (one user, one device, one code).
+async function incrementTwoFactorAttempts(id) {
+  const { data } = await supabase.from('two_factor_codes').select('attempts').eq('id', id).maybeSingle();
+  const next = (data?.attempts || 0) + 1;
+  await supabase.from('two_factor_codes').update({ attempts: next }).eq('id', id);
+  return next;
+}
+async function consumeTwoFactorCode(id) {
+  const { error } = await supabase.from('two_factor_codes').update({ consumed_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------------
+// Reset Data — deletes every entity row for a user WITHOUT deleting the auth
+// user/profile itself (distinct from DELETE /api/me, which deletes the whole
+// account via supabase.auth.admin.deleteUser). Used by the irreversible
+// "type RESET to confirm" flow, and as the required precondition before
+// Cloud Backup's Restore (see POST /api/import — restore refuses to run
+// against a non-empty account rather than attempting any merge/conflict
+// resolution).
+// ---------------------------------------------------------------------------
+async function resetUserData(userId) {
+  for (const table of RESETTABLE_TABLES) {
+    const { error } = await supabase.from(table).delete().eq('user_id', userId);
+    if (error) throw error;
+  }
+}
+async function countUserData(userId) {
+  const counts = await Promise.all(
+    RESETTABLE_TABLES.map((table) => supabase.from(table).select('id', { count: 'exact', head: true }).eq('user_id', userId))
+  );
+  return counts.reduce((sum, { count, error }) => {
+    if (error) throw error;
+    return sum + (count || 0);
+  }, 0);
+}
+
+// Free-tier storage safeguard (Supabase's free plan caps total database
+// storage at 500MB) — Ask AI history backs quick financial Q&A, not a
+// durable record the way transactions/budgets/bills are, so it doesn't need
+// to be kept indefinitely. No cron/scheduled job exists in this codebase, so
+// cleanup is opportunistic instead: called from the two routes a user
+// actually hits while using the feature (GET /api/ai/conversations,
+// POST .../messages) rather than running as a background process. A single
+// indexed DELETE (ai_conversations_user_last_message_idx) that's usually a
+// no-op is cheap enough to run on every call. Cascades to ai_messages via
+// its FK (0018_ai_conversations.sql), so this is the only delete needed.
+// Mirrored in the mobile app's AskHistoryScreen copy — keep both in sync if
+// this number ever changes.
+const AI_HISTORY_RETENTION_DAYS = 5;
+async function deleteOldConversations(userId) {
+  const cutoff = new Date(Date.now() - AI_HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { error } = await supabase.from('ai_conversations').delete().eq('user_id', userId).lt('last_message_at', cutoff);
+  if (error) throw error;
+}
+
 module.exports = {
+  isMissingTableError,
   getUserBundle,
   getBills,
   getProfile,
@@ -295,6 +507,17 @@ module.exports = {
   getNotificationOverlay,
   upsertNotificationOverlay,
   markAllNotificationsRead,
+  upsertSession,
+  listSessions,
+  getSessionBySessionId,
+  revokeSession,
+  markSessionTwoFactorVerified,
+  insertTwoFactorCode,
+  getActiveTwoFactorCode,
+  incrementTwoFactorAttempts,
+  consumeTwoFactorCode,
+  resetUserData,
+  countUserData,
   insertTransactionsBulk,
   insertBillPayment,
   getAiUsageToday,
@@ -304,8 +527,11 @@ module.exports = {
   listMessages,
   insertMessage,
   touchConversation,
+  deleteOldConversations,
+  AI_HISTORY_RETENTION_DAYS,
   insertCategory: categoryHelpers.insert, updateCategory: categoryHelpers.update, deleteCategory: categoryHelpers.remove,
   insertAccount: accountHelpers.insert, updateAccount: accountHelpers.update, deleteAccount: accountHelpers.remove,
+  unsetOtherPrimaryAccounts,
   insertTransaction: transactionHelpers.insert, updateTransaction: transactionHelpers.update, deleteTransaction: transactionHelpers.remove,
   insertBudget: budgetHelpers.insert, updateBudget: budgetHelpers.update, deleteBudget: budgetHelpers.remove,
   insertBill: billHelpers.insert, updateBill: billHelpers.update, deleteBill: billHelpers.remove,

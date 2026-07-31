@@ -12,7 +12,7 @@ const STATUS_COLOR = {
 const STATUS_OPTIONS = ['open', 'assigned', 'in_progress', 'waiting_for_user', 'testing', 'resolved', 'closed', 'reopened'];
 const CATEGORY_OPTIONS = [
   'bug', 'feature_request', 'suggestion', 'complaint', 'performance', 'payment_issue',
-  'ai_assistant', 'voice_entry', 'ui_ux', 'sync_issue', 'security', 'billing', 'general_message', 'other',
+  'ai_assistant', 'voice_entry', 'ui_ux', 'sync_issue', 'security', 'billing', 'translation', 'general_message', 'other',
 ];
 const PRIORITY_COLOR = { low: 'default', normal: 'default', high: 'warning', urgent: 'error' };
 

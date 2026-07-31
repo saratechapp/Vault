@@ -1,0 +1,18 @@
+-- Per-type reminder preferences (Daily/Weekly/Monthly/Budget/Bill/Savings/
+-- Goal), mobile Settings module Phase 2. One jsonb column rather than a new
+-- table — same precedent as the existing `dashboard_layout jsonb` column
+-- (0001_init.sql), since this is a single small structured document per user,
+-- not a collection that needs its own rows/indexes.
+--
+-- Shape written/read by the backend (validated in server.js, not by a DB
+-- constraint, matching this schema's existing convention):
+-- {
+--   daily:   { enabled: bool, time: "HH:mm", sound: bool },
+--   weekly:  { enabled: bool, time: "HH:mm", days: [0-6], sound: bool },
+--   monthly: { enabled: bool, time: "HH:mm", dayOfMonth: 1-28, sound: bool },
+--   budget:  { enabled: bool, sound: bool },
+--   bill:    { enabled: bool, leadDays: int, sound: bool },
+--   savings: { enabled: bool, sound: bool },
+--   goal:    { enabled: bool, sound: bool }
+-- }
+alter table public.profiles add column if not exists reminder_settings jsonb;

@@ -14,6 +14,7 @@ export const FEEDBACK_TYPES = [
   { value: 'sync_issue', label: 'Sync Issue' },
   { value: 'security', label: 'Security Concern' },
   { value: 'billing', label: 'Billing Issue' },
+  { value: 'translation', label: 'Help Translate' },
   { value: 'other', label: 'Other' },
 ];
 
