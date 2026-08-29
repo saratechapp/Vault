@@ -25,7 +25,7 @@
 
 require('dotenv').config();
 const crypto = require('crypto');
-const { supabase } = require('../supabaseClient');
+const { supabase } = require('../src/supabaseClient');
 
 function generatePassword() {
   // 18 chars from a symbol-inclusive alphabet — comfortably clears typical

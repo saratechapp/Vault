@@ -8,41 +8,41 @@ const compression = require('compression');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
-const { supabase } = require('./supabaseClient');
-const db = require('./db');
-const adminDb = require('./adminDb');
-const adminRoutes = require('./routes/admin');
-const { parseDevice } = require('./lib/deviceParser');
-const plans = require('./plans');
+const { supabase } = require('./src/supabaseClient');
+const db = require('./src/db');
+const adminDb = require('./src/adminDb');
+const adminRoutes = require('./src/routes/admin');
+const { parseDevice } = require('./src/lib/deviceParser');
+const plans = require('./src/plans');
 const {
   iso, sortTransactionsRecentFirst, addDaysFromToday, round1, numOr, signAmount,
   categoryIdByName, startOfWeek, budgetWindow, budgetTransactionsInWindow,
   computeBudgetSpent, categorySpendForMonth,
-} = require('./services/shared');
+} = require('./src/services/shared');
 const {
   computeLedger, computeAccounts, computeCategories,
   buildSpendingTrend, buildTagTrend, buildCategorySpend, buildNetWorthTrend, buildMetrics,
-} = require('./services/metricsService');
-const { gradeFor, computeHealth } = require('./services/healthScoreEngine');
-const { computeBudgetPredictions, computeUnusedBudgets, recommendBudgetAdjustments } = require('./services/budgetAnalysisService');
-const { computeCashFlowForecast, computeSmartSavings, computeLowBalanceAlert } = require('./services/forecastService');
+} = require('./src/services/metricsService');
+const { gradeFor, computeHealth } = require('./src/services/healthScoreEngine');
+const { computeBudgetPredictions, computeUnusedBudgets, recommendBudgetAdjustments } = require('./src/services/budgetAnalysisService');
+const { computeCashFlowForecast, computeSmartSavings, computeLowBalanceAlert } = require('./src/services/forecastService');
 const {
   computeYearOverYear, computeAverageDailySpending, computeAverageMonthlySavings,
   computeWeekendVsWeekday, computeMostAndLeastExpensiveMonth,
   computeTopSpendingCategories, computeTopMerchants,
-} = require('./services/cashFlowAnalysisService');
+} = require('./src/services/cashFlowAnalysisService');
 const {
   computeSpendingInsights, computeDuplicateAlerts, computeRecurringPatterns,
   computeAnomalies, computeLargeExpenseAlerts, largestRecentExpense, SUBSCRIPTION_VENDOR_HINTS,
-} = require('./services/spendingAnalysisService');
-const { computeGoalInsights, computeGoalCompletionForecast, computeRequiredMonthlyContribution } = require('./services/goalAnalysisService');
-const { upcomingBills, computeBillPaymentHistory } = require('./services/billAnalysisService');
-const { mkNotif, computeGeneratedRows, generateNotificationsFor } = require('./services/notificationEngine');
-const { computeDailySummary, computeMonthlyAIReport, computeWeeklySummary } = require('./services/financialInsightsService');
-const { buildRecommendations } = require('./services/recommendationEngine');
-const { computeAiInsightsBundle } = require('./services/aiInsightsBundle');
-const assistantEngine = require('./services/assistantEngine');
-const insightsCache = require('./services/cache');
+} = require('./src/services/spendingAnalysisService');
+const { computeGoalInsights, computeGoalCompletionForecast, computeRequiredMonthlyContribution } = require('./src/services/goalAnalysisService');
+const { upcomingBills, computeBillPaymentHistory } = require('./src/services/billAnalysisService');
+const { mkNotif, computeGeneratedRows, generateNotificationsFor } = require('./src/services/notificationEngine');
+const { computeDailySummary, computeMonthlyAIReport, computeWeeklySummary } = require('./src/services/financialInsightsService');
+const { buildRecommendations } = require('./src/services/recommendationEngine');
+const { computeAiInsightsBundle } = require('./src/services/aiInsightsBundle');
+const assistantEngine = require('./src/services/assistantEngine');
+const insightsCache = require('./src/services/cache');
 
 const PORT = process.env.PORT || 4000;
 // Comma-separated list of allowed browser origins, e.g. "https://app.example.com,https://example.com".

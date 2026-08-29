@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { MODULES, isValidPair, catalog } = require('../adminPermissions');
+const { MODULES, isValidPair, catalog } = require('../src/adminPermissions');
 
 const allPairs = Object.entries(MODULES).flatMap(([module, { actions }]) => actions.map((action) => [module, action]));
 
