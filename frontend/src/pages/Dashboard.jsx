@@ -45,7 +45,11 @@ function AccountsStrip({ accounts }) {
   const { orderedIds, pinned, moveId, togglePin } = useAccountOrder(accountIds);
   const [dragId, setDragId] = useState(null);
   const byId = new Map(accounts.map((a) => [a.id, a]));
-  const ordered = orderedIds.map((id) => byId.get(id)).filter(Boolean);
+  // Primary account always leads the strip, ahead of pins/manual order —
+  // stable sort so relative order among the rest (pinned first, then manual
+  // drag order) is otherwise untouched.
+  const ordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
+    .sort((a, b) => Number(!!b.isPrimary) - Number(!!a.isPrimary));
 
   if (!accounts.length) {
     return (
@@ -88,6 +92,7 @@ function AccountsStrip({ accounts }) {
             trend={accountTrend(a.monthNet)}
             pinned={pinned.has(a.id)}
             onTogglePin={() => togglePin(a.id)}
+            isPrimary={a.isPrimary}
           />
         </div>
       ))}

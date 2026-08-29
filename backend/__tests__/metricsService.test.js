@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildNetWorthTrend } = require('../services/metricsService');
+const { buildNetWorthTrend } = require('../src/services/metricsService');
 
 function monthsAgo(n, day = 15) {
   const d = new Date();

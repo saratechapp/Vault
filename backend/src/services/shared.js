@@ -1,0 +1,133 @@
+// ---------------------------------------------------------------------------
+// small helpers shared across the analysis services (and, via server.js's
+// destructured require, by non-analysis route handlers too) — single source
+// of truth so nothing gets a second, possibly-drifting copy.
+// ---------------------------------------------------------------------------
+function iso(d) {
+  return d.toISOString().slice(0, 10);
+}
+function sortTransactionsRecentFirst(list) {
+  return list
+    .map((t, i) => [t, i])
+    .sort(([a, ai], [b, bi]) => new Date(b.date) - new Date(a.date) || bi - ai)
+    .map(([t]) => t);
+}
+function addDaysFromToday(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d;
+}
+function round1(n) {
+  return Math.round(n * 10) / 10;
+}
+// `Number(x) || 0` shows up all over the insert/patch payload builders and
+// analysis code to coerce a possibly-missing/blank numeric field to a safe
+// default.
+function numOr(value, fallback = 0) {
+  return Number(value) || fallback;
+}
+function signAmount(type, amount) {
+  const abs = Math.abs(numOr(amount));
+  if (type === 'expense') return -abs;
+  return abs; // income and transfer are stored positive
+}
+// Categories are now Postgres-generated UUIDs (not the old fixed string ids
+// like 'cat_transfer'/'cat_subscriptions'), so anything that used to hardcode
+// one of those ids has to resolve it by name against this user's own
+// categories instead — the signup trigger (0001_init.sql) still seeds every
+// new user with a 'Transfer' and a 'Subscriptions' category by that exact
+// name, so this stays equivalent to the old hardcoded lookup.
+function categoryIdByName(categories, name) {
+  const cat = categories.find((c) => c.name === name);
+  return cat ? cat.id : null;
+}
+
+// A transaction counts as "spend" for category/budget aggregation when it's
+// a plain expense, or a transfer that carries a real, user-chosen category
+// (e.g. a bill paid by moving money to a dedicated account, tagged "Health
+// Insurance" rather than left in the generic "Transfer" bucket) — the money
+// left the categorized purpose even though it moved between two of the
+// user's own accounts. A transfer with no specific category (or explicitly
+// "Transfer") stays excluded: that's a real account-to-account movement, not
+// spending, and counting it would double-count against genuine expenses.
+function isCategorizedSpend(t, transferCategoryId) {
+  if (t.type === 'expense') return true;
+  return t.type === 'transfer' && !!t.categoryId && t.categoryId !== transferCategoryId;
+}
+
+// `weekStartPref` is the user's profiles.week_start value ('sunday' |
+// 'monday' | 'saturday' | 'system' | undefined) — mobile Settings module
+// Phase 2's Week Start Day setting (see 0019_profile_personalization_fields).
+// Defaults to Monday (this function's original, only-ever behavior) for
+// every caller that doesn't pass one, so this stays behavior-neutral for
+// every existing call site until one is deliberately updated to thread a
+// real user preference through (see server.js's budget routes).
+const WEEK_START_DAY_NUMBER = { sunday: 0, monday: 1, saturday: 6 };
+function startOfWeek(date, weekStartPref) {
+  const startDay = WEEK_START_DAY_NUMBER[weekStartPref] ?? 1;
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = -((day - startDay + 7) % 7);
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function budgetWindow(budget, weekStartPref) {
+  const now = new Date();
+  if (budget.period === 'custom' && budget.startDate) {
+    return { start: new Date(budget.startDate), end: budget.endDate ? new Date(budget.endDate) : now };
+  }
+  if (budget.period === 'weekly') {
+    const start = startOfWeek(now, weekStartPref);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    end.setHours(23, 59, 59, 999);
+    return { start, end };
+  }
+  if (budget.period === 'yearly') {
+    return { start: new Date(now.getFullYear(), 0, 1), end: new Date(now.getFullYear(), 11, 31, 23, 59, 59) };
+  }
+  return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59) };
+}
+function budgetTransactionsInWindow(budget, transactions, categories, weekStartPref) {
+  const catIds = new Set([budget.categoryId, ...categories.filter((c) => c.parentId === budget.categoryId).map((c) => c.id)]);
+  const { start, end } = budgetWindow(budget, weekStartPref);
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
+  return transactions.filter((t) => isCategorizedSpend(t, transferCategoryId) && catIds.has(t.categoryId)).filter((t) => {
+    const d = new Date(t.date);
+    return d >= start && d <= end;
+  });
+}
+function computeBudgetSpent(budget, transactions, categories, weekStartPref) {
+  return budgetTransactionsInWindow(budget, transactions, categories, weekStartPref).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+}
+
+function categorySpendForMonth(transactions, categories, year, month) {
+  const topLevelIdOf = new Map(categories.map((c) => [c.id, c.parentId || c.id]));
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
+  const map = new Map();
+  transactions.forEach((t) => {
+    if (!isCategorizedSpend(t, transferCategoryId)) return;
+    const d = new Date(t.date);
+    if (d.getFullYear() !== year || d.getMonth() !== month) return;
+    const topId = topLevelIdOf.get(t.categoryId) || null;
+    map.set(topId, (map.get(topId) || 0) + Math.abs(t.amount));
+  });
+  return map;
+}
+
+module.exports = {
+  iso,
+  sortTransactionsRecentFirst,
+  addDaysFromToday,
+  round1,
+  numOr,
+  signAmount,
+  categoryIdByName,
+  isCategorizedSpend,
+  startOfWeek,
+  budgetWindow,
+  budgetTransactionsInWindow,
+  computeBudgetSpent,
+  categorySpendForMonth,
+};

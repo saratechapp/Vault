@@ -16,8 +16,8 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const dataCrypto = require('../crypto');
-const { supabase } = require('../supabaseClient');
+const dataCrypto = require('../src/crypto');
+const { supabase } = require('../src/supabaseClient');
 
 const TARGET_EMAIL = 'saravananmalikaraj@gmail.com';
 const DATA_FILE = path.join(__dirname, '..', 'sampledata.json');

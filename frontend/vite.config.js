@@ -40,15 +40,15 @@ export default defineConfig({
         target: 'http://localhost:4000',
         changeOrigin: true,
       },
-      // Dev-only convenience: forwards to the separate admin/ Vite app (see
-      // admin/vite.config.js, which sets base: '/superadmin/' to match) so
-      // there's one URL/port to remember instead of two. `ws: true` carries
-      // the admin app's own HMR websocket through. In production this needs
-      // a matching reverse-proxy rule — nothing here helps outside dev.
+      // Dev-only convenience: forwards to the one backend server, which
+      // serves the Super Admin SPA as static files under /superadmin (see
+      // backend/src/app.js). Lets the Topbar's "Super Admin" button and a
+      // bare localhost:5173/superadmin/ both work while running the consumer
+      // app on its own port. In production everything is same-origin, so no
+      // proxy is involved. There is no separate admin dev server.
       '/superadmin': {
-        target: 'http://localhost:5174',
+        target: 'http://localhost:4000',
         changeOrigin: true,
-        ws: true,
       },
     },
   },

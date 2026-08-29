@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { PLANS, getPlanConfig, can, limitFor, serializableLimits } = require('../plans');
+const { PLANS, getPlanConfig, can, limitFor, serializableLimits } = require('../src/plans');
 
 test('getPlanConfig resolves each of the 4 real tiers by exact key', () => {
   assert.equal(getPlanConfig('free'), PLANS.free);

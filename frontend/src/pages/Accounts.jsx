@@ -11,6 +11,12 @@ import { useTxCreatedListener } from '../context/NewTransactionContext.jsx';
 import { notifyAccountsChanged } from '../context/AccountsGateContext.jsx';
 import { peekCreateAccountPrompt, clearCreateAccountPrompt } from '../lib/onboarding.js';
 
+// Primary account always leads the list; stable sort preserves the existing
+// relative order among the rest (creation order from the API).
+function withPrimaryFirst(list) {
+  return [...list].sort((a, b) => Number(!!b.isPrimary) - Number(!!a.isPrimary));
+}
+
 const TYPES = [
   { value: 'bank', label: 'Bank', icon: 'Landmark' },
   { value: 'savings', label: 'Savings', icon: 'PiggyBank' },
@@ -167,7 +173,7 @@ export default function Accounts() {
     setLoadError('');
     try {
       const list = await accountsApi.list();
-      setAccounts(list || []);
+      setAccounts(withPrimaryFirst(list || []));
     } catch (err) {
       setLoadError(err.message || 'Could not load your accounts.');
     } finally {

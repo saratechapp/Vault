@@ -16,10 +16,11 @@ import { Link } from 'react-router-dom';
  *   trend      — { direction: 'up'|'down'|'flat', label: string } — optional ↑/↓ badge vs last month
  *   pinned     — whether this card is pinned (shows a filled pin)
  *   onTogglePin — if provided, renders a pin toggle button in the top-right corner
+ *   isPrimary  — shows a small "Primary" pill next to the title
  */
 export function GlowCard({
   href, color = '#6366f1', Icon, title, value, subtitle,
-  negative = false, width = 'w-[240px]', trend = null, pinned = false, onTogglePin,
+  negative = false, width = 'w-[240px]', trend = null, pinned = false, onTogglePin, isPrimary = false,
 }) {
   const Wrapper = href ? Link : 'div';
   const wrapperProps = href ? { to: href } : {};
@@ -52,6 +53,9 @@ export function GlowCard({
             style={{ background: color, boxShadow: `0 0 10px ${color}` }}
           />
           <div className="truncate text-xs font-medium text-fg/80">{title}</div>
+          {isPrimary && (
+            <span className="shrink-0 rounded-full bg-brand-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-brand-500">Primary</span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {onTogglePin && (

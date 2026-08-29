@@ -161,6 +161,82 @@ describe('AuthContext — logout', () => {
   });
 });
 
+describe('AuthContext — passwordless email signup', () => {
+  it('startEmailSignup sends the code via signInWithOtp (creating the user) and returns no session', async () => {
+    supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    await act(async () => {
+      await result.current.startEmailSignup('new@example.com');
+    });
+
+    expect(supabaseMock.auth.signInWithOtp).toHaveBeenCalledWith({
+      email: 'new@example.com',
+      options: { shouldCreateUser: true },
+    });
+    expect(result.current.isAuthed).toBe(false);
+  });
+
+  it('startEmailSignup throws the Supabase error message', async () => {
+    supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+    supabaseMock.auth.signInWithOtp.mockResolvedValue({ data: {}, error: { message: 'Email rate limit exceeded' } });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    await expect(result.current.startEmailSignup('new@example.com')).rejects.toThrow('Email rate limit exceeded');
+  });
+
+  it('verifyEmailOtp verifies the code (type: email), establishes the session, and leaves needsPassword true', async () => {
+    supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+    supabaseMock.auth.verifyOtp.mockResolvedValue({ data: { session: withSession(), user: { id: 'user-1' } }, error: null });
+    // Fresh account: profiles.has_password still false — nothing set it.
+    mockUserProfile({ id: 'user-1', hasPassword: false, name: '' });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    await act(async () => {
+      await result.current.verifyEmailOtp('new@example.com', '123456');
+    });
+
+    expect(supabaseMock.auth.verifyOtp).toHaveBeenCalledWith({ email: 'new@example.com', token: '123456', type: 'email' });
+    // Crucially NOT called here — the password is only recorded later, from
+    // the /create-password step, so needsPassword stays true until then.
+    expect(apiPost).not.toHaveBeenCalledWith('/me/password-set');
+    await waitFor(() => expect(result.current.needsPassword).toBe(true));
+  });
+
+  it('verifyEmailOtp throws the Supabase error message on a bad or expired code', async () => {
+    supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+    supabaseMock.auth.verifyOtp.mockResolvedValue({ data: {}, error: { message: 'Token has expired or is invalid' } });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    await expect(result.current.verifyEmailOtp('new@example.com', '000000')).rejects.toThrow('Token has expired or is invalid');
+    expect(result.current.isAuthed).toBe(false);
+  });
+
+  it('resendEmailOtp re-issues the code via signInWithOtp', async () => {
+    supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    await act(async () => {
+      await result.current.resendEmailOtp('new@example.com');
+    });
+
+    expect(supabaseMock.auth.signInWithOtp).toHaveBeenCalledWith({
+      email: 'new@example.com',
+      options: { shouldCreateUser: true },
+    });
+  });
+});
+
 describe('AuthContext — loginWithOAuth', () => {
   it('calls supabase.auth.signInWithOAuth with the requested provider (redirect behavior itself is out of scope)', async () => {
     supabaseMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
