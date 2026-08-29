@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
+    "dev": "node scripts/dev.js",
+    "dev:api": "nodemon server.js",
     "test": "node --test '__tests__/*.test.js' 'src/**/__tests__/*.test.js'",
     "build:admin": "node scripts/build-admin.js",
     "build": "npm run build:admin"

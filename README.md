@@ -27,15 +27,21 @@ So in production there is one API host (Render) that also serves the admin UI at
 ```bash
 cd backend && npm install
 cd ../frontend && npm install
-cd ../backend/admin && npm install
+# backend/admin deps are installed automatically on the first `npm run dev`
 ```
 
-Terminal 1 — API:
+Terminal 1 — backend **+ Super Admin** (one command, one server):
 
 ```bash
 cd backend
 npm run dev
 ```
+
+This starts the Express API and a Vite watcher that keeps `backend/admin/dist`
+fresh; the API serves the admin UI itself. No separate admin server.
+
+- API — http://localhost:4000/api
+- Super Admin — http://localhost:4000/superadmin/ (sign in as the seeded Super Admin)
 
 Terminal 2 — consumer app:
 
@@ -44,16 +50,11 @@ cd frontend
 npm run dev
 ```
 
-Terminal 3 — admin app (optional; only when working on the admin panel):
+Open http://localhost:5173 and sign up with any name/email/password.
 
-```bash
-cd backend/admin
-npm run dev
-```
-
-Open http://localhost:5173 and sign up with any name/email/password. The admin
-panel is at http://localhost:5173/superadmin (the consumer dev server proxies
-`/superadmin` to the admin dev server on port 5174, with HMR).
+> Optional: to iterate on the admin UI with hot-module reload instead of a
+> full rebuild-on-save, also run `cd backend/admin && npm run dev` and open
+> http://localhost:5174/superadmin/ — never required.
 
 ## Production build
 
