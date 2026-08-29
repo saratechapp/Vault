@@ -2,71 +2,123 @@
 
 A premium, desktop-web personal finance manager: accounts, transactions, budgets,
 recurring bills, savings goals, debt payoff planning, reports, notifications and a
-fully customizable dashboard — backed by an Express API that encrypts its data
-file at rest (AES-256-GCM).
+fully customizable dashboard — backed by an Express API over Supabase (Postgres +
+Supabase Auth). Signup/login/OAuth happen client-side against Supabase Auth; the
+backend verifies the resulting JWT and does its own ownership / admin-role checks.
 
 See [`doc/FULL_APP_RECREATION_GUIDE.md`](doc/FULL_APP_RECREATION_GUIDE.md) for the
 complete spec this app was built from.
+
+## Project layout
+
+Two deployables:
+
+- **`frontend/`** — the consumer React/Vite SPA (deploys to Vercel or any static host).
+- **`backend/`** — the Node/Express API **and** the Super Admin panel:
+  - `backend/server.js` + `routes/`, `services/`, `lib/` — the `/api` and `/api/admin` API.
+  - `backend/admin/` — the admin React/Vite SPA (MUI). `npm run build` compiles it
+    into `backend/admin/dist`, which the server serves under `/superadmin`.
+
+So in production there is one API host (Render) that also serves the admin UI at
+`https://<backend-host>/superadmin`, and one static host for the consumer app.
 
 ## Quick start
 
 ```bash
 cd backend && npm install
 cd ../frontend && npm install
+cd ../backend/admin && npm install
 ```
 
-Terminal 1:
+Terminal 1 — API:
 
 ```bash
 cd backend
 npm run dev
 ```
 
-Terminal 2:
+Terminal 2 — consumer app:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open http://localhost:5173 and sign up with any name/email/password.
+Terminal 3 — admin app (optional; only when working on the admin panel):
+
+```bash
+cd backend/admin
+npm run dev
+```
+
+Open http://localhost:5173 and sign up with any name/email/password. The admin
+panel is at http://localhost:5173/superadmin (the consumer dev server proxies
+`/superadmin` to the admin dev server on port 5174, with HMR).
+
+## Production build
+
+```bash
+cd frontend && npm ci && npm run build     # -> frontend/dist  (static host)
+cd ../backend && npm ci && npm run build   # -> backend/admin/dist, then `npm start`
+```
+
+`backend`'s `npm run build` installs and builds `backend/admin`; `npm start` then
+serves the API plus that admin build under `/superadmin`. On Render set the build
+command to `npm ci && npm run build` and provide `VITE_SUPABASE_URL` /
+`VITE_SUPABASE_ANON_KEY` (needed at admin build time) alongside the usual backend
+env vars — see `backend/.env.example` and `render.yaml`.
+
+Deploy targets: consumer frontend → Vercel (`frontend/vercel.json` rewrites `/api/*`
+to the Render host — required, since `frontend/src/lib/api.js` uses the relative path
+`/api`); backend + admin → one Render web service (`render.yaml`). Admins reach the
+panel at `https://<render-host>/superadmin/` directly.
 
 ## Environment variables
 
 Copy `backend/.env.example` → `backend/.env` and `frontend/.env.example` → `frontend/.env`, then fill in what you need.
 
 - `PORT` (backend) — default `4000`.
-- `WALLET_DATA_KEY` (backend) — 32-byte key as 64 hex chars or base64. Overrides the
-  auto-generated `backend/.data-key`.
-- `GOOGLE_CLIENT_ID` (backend) / `VITE_GOOGLE_CLIENT_ID` (frontend) — enables real
-  "Sign in with Google" on the Login/Signup pages. Both must be set to the **same**
-  Client ID. Without it, the Google button shows a friendly "not configured" error
-  instead of crashing.
+- `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (backend) — **required**; the backend
+  refuses to boot without them. The service-role key is server-only.
+- `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (frontend, and `backend/.env` for the
+  admin build) — the public anon key. Required by `npm run build` in `backend/` (it
+  compiles the admin SPA); unused by `npm start` / `npm run dev`.
+- `CORS_ORIGIN` (backend) — comma-separated allowed browser origins; unset = allow all
+  (dev only). `TRUST_PROXY` (backend) — set behind a reverse proxy. `FRONTEND_URL`
+  (backend) — consumer origin, used to build the impersonation magic-link redirect.
+- `WALLET_DATA_KEY` (backend) — reserved/unused. Data now lives in Supabase Postgres
+  (encrypted at rest by Supabase); `backend/src/crypto.js` is kept only for possible
+  future field-level encryption.
 
-### Setting up Google sign-in
+Supabase migrations (`backend/supabase/migrations/*.sql`) are applied out of band via
+the Supabase SQL editor or `supabase db push` — there is no migration runner in the
+build or boot path. Apply pending migrations **before** deploying code that needs them.
 
-1. [console.cloud.google.com](https://console.cloud.google.com) → create/select a project.
-2. **APIs & Services → OAuth consent screen** → External → fill in app name + your email → save.
-3. **APIs & Services → Credentials → + Create Credentials → OAuth client ID** → type **Web application**.
-4. Under **Authorized JavaScript origins**, add `http://localhost:5173` (and your production URL later).
-5. Copy the generated Client ID (`xxxx.apps.googleusercontent.com`).
-6. Put it in both `backend/.env` (`GOOGLE_CLIENT_ID=...`) and `frontend/.env` (`VITE_GOOGLE_CLIENT_ID=...`).
-7. Restart both dev servers.
+Google sign-in is a Supabase Auth OAuth provider (configured in the Supabase
+dashboard → Authentication → Providers), not an app env var. New Google sign-ins are
+matched/created by email — signing in with Google using an email that already has a
+password account logs into that same account.
 
-New Google sign-ins are matched/created by email — signing in with Google using an
-email that already has a password account logs into that same account.
+## Super Admin panel
+
+`backend/admin/` is a separate Vite/React (MUI) SPA. `npm run build` in `backend/`
+compiles it into `backend/admin/dist`, which the API serves under `/superadmin` from
+the same host. The access boundary is enforced server-side in
+`backend/src/middleware/adminAuth.js`: a request needs a valid Supabase JWT **and** an
+active row in the `admins` table (`requireAdminAuth`), and every `/api/admin/*` route
+additionally checks `requirePermission(module, action)`. The "Super Admin" role
+(`admin_roles.is_system = true`) bypasses the per-permission checks. Bootstrap the
+first admin with `node backend/scripts/seed-super-admin.js --email=you@example.com`.
 
 ## Future enhancements
 
 1. CSV/OFX/QIF importers — currently CSV only.
-2. Argon2id password hashing with per-user tuning + breach-list checks.
-3. Server-side account balance snapshots for accurate long-range balance trends.
-4. Real bank sync via a paid aggregator (Plaid / Salt Edge / Sahamati).
-5. Cloud sync & multi-device — needs a real database.
-6. PDF export (currently CSV only).
-7. Push / email notification delivery.
-8. Roles & sharing (owner/editor/viewer workspaces).
-9. Receipt OCR.
-10. Split transactions across multiple categories.
-11. HTTPS in dev.
-12. WebAuthn / biometrics on desktop.
+2. Server-side account balance snapshots for accurate long-range balance trends.
+3. Real bank sync via a paid aggregator (Plaid / Salt Edge / Sahamati).
+4. PDF export (currently CSV only).
+5. Push / email notification delivery.
+6. Roles & sharing (owner/editor/viewer workspaces) for consumer accounts.
+7. Receipt OCR.
+8. Split transactions across multiple categories.
+9. HTTPS in dev.
+10. WebAuthn / biometrics on desktop.
