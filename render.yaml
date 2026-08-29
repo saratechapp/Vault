@@ -1,0 +1,35 @@
+# Render blueprint for the backend web service. One service runs the Express
+# API (/api), the Super Admin API (/api/admin) and the Super Admin SPA
+# (/superadmin) — there is no separate admin service.
+#
+# The consumer frontend deploys separately (Vercel; see frontend/vercel.json).
+# Supabase migrations in backend/supabase/migrations are applied out of band
+# (Supabase SQL editor / `supabase db push`) BEFORE deploying code that needs
+# them — there is no migration runner in the build or boot path.
+services:
+  - type: web
+    name: wallet-backend
+    runtime: node
+    rootDir: backend
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production            # keep the rate limiter ON — never "development"
+      - key: TRUST_PROXY
+        value: "1"                    # Render terminates TLS at a proxy
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false                   # consumed by scripts/build-admin.js at build time
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false                   # public anon key, safe to embed in the admin bundle
+      - key: CORS_ORIGIN
+        sync: false                   # the Vercel production origin(s), comma-separated
+      - key: FRONTEND_URL
+        sync: false                   # Vercel consumer origin — impersonation magic-link redirect
