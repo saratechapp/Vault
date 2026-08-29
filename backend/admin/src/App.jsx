@@ -12,6 +12,7 @@ import RoleList from './pages/RBAC/RoleList.jsx';
 import RoleEditor from './pages/RBAC/RoleEditor.jsx';
 import FeedbackList from './pages/Feedback/FeedbackList.jsx';
 import FeedbackDetail from './pages/Feedback/FeedbackDetail.jsx';
+import SubscriptionsPage from './pages/Subscriptions/SubscriptionsPage.jsx';
 
 function Protected({ children }) {
   const { isAuthed, ready } = useAdminAuth();
@@ -40,6 +41,7 @@ function AppRoutes() {
         <Route path="rbac/:id" element={<RequirePermission module="rbac" action="view"><RoleEditor /></RequirePermission>} />
         <Route path="feedback" element={<RequirePermission module="feedback" action="view"><FeedbackList /></RequirePermission>} />
         <Route path="feedback/:id" element={<RequirePermission module="feedback" action="view"><FeedbackDetail /></RequirePermission>} />
+        <Route path="subscriptions" element={<RequirePermission module="subscriptions" action="view"><SubscriptionsPage /></RequirePermission>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

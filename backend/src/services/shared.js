@@ -42,6 +42,19 @@ function categoryIdByName(categories, name) {
   return cat ? cat.id : null;
 }
 
+// A transaction counts as "spend" for category/budget aggregation when it's
+// a plain expense, or a transfer that carries a real, user-chosen category
+// (e.g. a bill paid by moving money to a dedicated account, tagged "Health
+// Insurance" rather than left in the generic "Transfer" bucket) — the money
+// left the categorized purpose even though it moved between two of the
+// user's own accounts. A transfer with no specific category (or explicitly
+// "Transfer") stays excluded: that's a real account-to-account movement, not
+// spending, and counting it would double-count against genuine expenses.
+function isCategorizedSpend(t, transferCategoryId) {
+  if (t.type === 'expense') return true;
+  return t.type === 'transfer' && !!t.categoryId && t.categoryId !== transferCategoryId;
+}
+
 // `weekStartPref` is the user's profiles.week_start value ('sunday' |
 // 'monday' | 'saturday' | 'system' | undefined) — mobile Settings module
 // Phase 2's Week Start Day setting (see 0019_profile_personalization_fields).
@@ -79,7 +92,8 @@ function budgetWindow(budget, weekStartPref) {
 function budgetTransactionsInWindow(budget, transactions, categories, weekStartPref) {
   const catIds = new Set([budget.categoryId, ...categories.filter((c) => c.parentId === budget.categoryId).map((c) => c.id)]);
   const { start, end } = budgetWindow(budget, weekStartPref);
-  return transactions.filter((t) => t.type === 'expense' && catIds.has(t.categoryId)).filter((t) => {
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
+  return transactions.filter((t) => isCategorizedSpend(t, transferCategoryId) && catIds.has(t.categoryId)).filter((t) => {
     const d = new Date(t.date);
     return d >= start && d <= end;
   });
@@ -90,9 +104,10 @@ function computeBudgetSpent(budget, transactions, categories, weekStartPref) {
 
 function categorySpendForMonth(transactions, categories, year, month) {
   const topLevelIdOf = new Map(categories.map((c) => [c.id, c.parentId || c.id]));
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
   const map = new Map();
   transactions.forEach((t) => {
-    if (t.type !== 'expense') return;
+    if (!isCategorizedSpend(t, transferCategoryId)) return;
     const d = new Date(t.date);
     if (d.getFullYear() !== year || d.getMonth() !== month) return;
     const topId = topLevelIdOf.get(t.categoryId) || null;
@@ -109,6 +124,7 @@ module.exports = {
   numOr,
   signAmount,
   categoryIdByName,
+  isCategorizedSpend,
   startOfWeek,
   budgetWindow,
   budgetTransactionsInWindow,

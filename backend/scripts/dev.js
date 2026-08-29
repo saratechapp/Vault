@@ -10,9 +10,8 @@
 //   Super Admin API  http://localhost:<PORT>/api/admin
 //   Super Admin UI   http://localhost:<PORT>/superadmin/
 //
-// (Full page reload on admin edits, not HMR. If you want HMR while iterating
-//  on the admin UI, `cd backend/admin && npm run dev` is still there as an
-//  optional extra — it is never required.)
+// (Full page reload on admin edits, not HMR. The admin app has no dev server
+//  of its own — no second command, no second port.)
 
 require('dotenv').config();
 const { spawn, spawnSync } = require('child_process');
@@ -21,7 +20,6 @@ const path = require('path');
 
 const BACKEND_DIR = path.join(__dirname, '..');
 const ADMIN_DIR = path.join(BACKEND_DIR, 'admin');
-const DIST_INDEX = path.join(ADMIN_DIR, 'dist', 'index.html');
 const VITE_VARS = ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY'];
 
 const children = [];
@@ -62,43 +60,64 @@ if (!fs.existsSync(path.join(ADMIN_DIR, 'node_modules'))) {
   }
 }
 
+const DIST_INDEX = path.join(ADMIN_DIR, 'dist', 'index.html');
 const haveViteVars = VITE_VARS.every((k) => process.env[k]);
 
-if (!haveViteVars) {
-  console.warn(
-    `[dev] ${VITE_VARS.join(' / ')} not set (backend/.env) — starting the API only.\n` +
-    '[dev] /superadmin will not be served until they are set and you re-run `npm run dev`.'
+function startApi() {
+  // The one server. nodemon watches server.js + src/ (see nodemonConfig); it
+  // ignores admin/, so admin rebuilds never bounce the API.
+  const api = spawn('npm', ['run', 'dev:api'], { cwd: BACKEND_DIR, env: process.env });
+  pipePrefixed(api, 'api');
+  api.on('exit', (code) => { if (!shuttingDown) shutdown(code ?? 0); });
+  children.push(api);
+
+  const port = process.env.PORT || 4000;
+  process.stdout.write(
+    `\n[dev] one command, one server:\n` +
+    `[dev]   API            http://localhost:${port}/api\n` +
+    `[dev]   Super Admin UI  http://localhost:${port}/superadmin/\n\n`
   );
-} else {
-  // 2. Guarantee dist exists before the server boots — src/app.js decides
-  //    whether to mount /superadmin with a one-time fs.existsSync check.
-  if (!fs.existsSync(DIST_INDEX)) {
-    console.log('[dev] building Super Admin (first build)...');
-    const build = spawnSync('npm', ['run', 'build'], { cwd: ADMIN_DIR, stdio: 'inherit', env: process.env });
-    if (build.status !== 0) {
-      console.error('[dev] initial Super Admin build failed.');
-      process.exit(1);
-    }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+(async () => {
+  if (!haveViteVars) {
+    console.warn(
+      `[dev] ${VITE_VARS.join(' / ')} not set (backend/.env) — starting the API only.\n` +
+      '[dev] /superadmin will not be served until they are set and you re-run `npm run dev`.'
+    );
+    startApi();
+    return;
   }
 
-  // 3. Keep dist fresh on every admin source edit (rebuild + browser refresh;
-  //    Express serves whatever is currently on disk, so no server restart).
+  // 2. Start the Vite watcher. `vite build --watch` empties admin/dist for its
+  //    own first pass, so we must NOT start the API until that first build has
+  //    landed — otherwise src/app.js's one-time fs.existsSync check races an
+  //    empty dir and /superadmin 500s for the first several seconds. Clear
+  //    dist ourselves first so the wait in step 3 can't be satisfied by a
+  //    stale index.html from a previous run.
+  console.log('[dev] building Super Admin (first build)...');
+  fs.rmSync(path.join(ADMIN_DIR, 'dist'), { recursive: true, force: true });
   const watcher = spawn('npm', ['run', 'build:watch'], { cwd: ADMIN_DIR, env: process.env });
   pipePrefixed(watcher, 'admin');
   watcher.on('exit', (code) => { if (!shuttingDown) shutdown(code ?? 0); });
   children.push(watcher);
-}
 
-// 4. The one server. nodemon watches server.js + src/ (see nodemonConfig);
-//    it ignores admin/, so admin rebuilds never bounce the API.
-const api = spawn('npm', ['run', 'dev:api'], { cwd: BACKEND_DIR, env: process.env });
-pipePrefixed(api, 'api');
-api.on('exit', (code) => { if (!shuttingDown) shutdown(code ?? 0); });
-children.push(api);
-
-const port = process.env.PORT || 4000;
-process.stdout.write(
-  `\n[dev] one command, one server:\n` +
-  `[dev]   API            http://localhost:${port}/api\n` +
-  `[dev]   Super Admin UI  http://localhost:${port}/superadmin/\n\n`
-);
+  // 3. Wait for that first build to produce dist/index.html (bounded), then
+  //    boot the API. Subsequent edits just rewrite dist in place — Express
+  //    serves whatever is on disk, no server restart.
+  const deadline = Date.now() + 120_000;
+  while (!fs.existsSync(DIST_INDEX)) {
+    if (shuttingDown) return;
+    if (Date.now() > deadline) {
+      console.error('[dev] Super Admin build did not finish within 120s — aborting.');
+      shutdown(1);
+      return;
+    }
+    await sleep(250);
+  }
+  await sleep(500); // let the last files of the build settle before serving
+  console.log('[dev] Super Admin build ready.');
+  startApi();
+})();

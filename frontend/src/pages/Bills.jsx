@@ -146,7 +146,7 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
             <Input type="date" value={form.dueDate} onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))} />
           </Field>
         </div>
-        {form.type !== 'transfer' && (
+        {form.type !== 'transfer' ? (
           <div className="grid grid-cols-2 gap-3">
             <Field label="Category (label)">
               <Select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
@@ -165,6 +165,25 @@ function BillModal({ open, onClose, editing, categories, accounts, onSaved }) {
               />
             </Field>
           </div>
+        ) : (
+          // Optional on a transfer — left unset, the backend falls back to
+          // the generic "Transfer" category. Choosing a real one (e.g.
+          // "Health Insurance" for a bill paid by moving money to a
+          // dedicated account) is what makes this bill's payments still
+          // count toward that category's spend in Reports/budgets
+          // (isCategorizedSpend, backend/services/shared.js) instead of
+          // disappearing into an untracked account-to-account movement.
+          <Field label="Category (for posting) — optional">
+            <IconSelect
+              value={form.categoryId} options={categories} placeholder="Defaults to Transfer"
+              onChange={(id) => setForm((f) => ({ ...f, categoryId: id }))}
+              renderIcon={(c) => (
+                <span className="flex h-6 w-6 items-center justify-center rounded-md" style={{ background: `${c.color}22`, color: c.color }}>
+                  <DynamicIcon name={c.icon} size={13} />
+                </span>
+              )}
+            />
+          </Field>
         )}
         {form.type === 'transfer' ? (
           <div className="grid grid-cols-2 gap-3">

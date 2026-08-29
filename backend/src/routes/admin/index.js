@@ -8,6 +8,7 @@ const rbacRoutes = require('./rbac');
 const feedbackRoutes = require('./feedback');
 const impersonationRoutes = require('./impersonation');
 const notificationsRoutes = require('./notifications');
+const subscriptionsRoutes = require('./subscriptions');
 
 const router = express.Router();
 
@@ -50,5 +51,6 @@ router.use('/rbac', rbacRoutes);
 router.use('/feedback', feedbackRoutes);
 router.use('/impersonation', impersonationRoutes);
 router.use('/notifications', notificationsRoutes);
+router.use('/subscriptions', subscriptionsRoutes);
 
 module.exports = router;

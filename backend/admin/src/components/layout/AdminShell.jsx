@@ -9,6 +9,7 @@ import PeopleIcon from '@mui/icons-material/PeopleOutline';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
 import SecurityIcon from '@mui/icons-material/GppGoodOutlined';
 import FeedbackIcon from '@mui/icons-material/ForumOutlined';
+import PaymentsIcon from '@mui/icons-material/PaymentsOutlined';
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined';
 import LightModeIcon from '@mui/icons-material/LightModeOutlined';
 import LogoutIcon from '@mui/icons-material/LogoutOutlined';
@@ -95,6 +96,7 @@ const NAV_ITEMS = [
   { to: '/admins', label: 'Admins', icon: AdminPanelSettingsIcon, module: 'admins' },
   { to: '/rbac', label: 'Roles & Permissions', icon: SecurityIcon, module: 'rbac' },
   { to: '/feedback', label: 'Feedback', icon: FeedbackIcon, module: 'feedback' },
+  { to: '/subscriptions', label: 'Subscriptions', icon: PaymentsIcon, module: 'subscriptions' },
 ];
 
 export function AdminShell() {

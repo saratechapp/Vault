@@ -1,4 +1,4 @@
-const { round1, addDaysFromToday } = require('./shared');
+const { round1, addDaysFromToday, categoryIdByName, isCategorizedSpend } = require('./shared');
 const { buildSpendingTrend } = require('./metricsService');
 
 // This month vs. the same calendar month last year — buildSpendingTrend's
@@ -78,8 +78,9 @@ function computeMostAndLeastExpensiveMonth(userData, accounts, { months = 12 } =
 // pass it explicitly for a capped top-N list.
 function computeTopSpendingCategories(userData, { n } = {}) {
   const { transactions, categories } = userData;
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
   const categoryTotals = new Map();
-  transactions.filter((t) => t.type === 'expense').forEach((t) => {
+  transactions.filter((t) => isCategorizedSpend(t, transferCategoryId)).forEach((t) => {
     categoryTotals.set(t.categoryId, (categoryTotals.get(t.categoryId) || 0) + Math.abs(t.amount));
   });
   const sorted = [...categoryTotals.entries()]

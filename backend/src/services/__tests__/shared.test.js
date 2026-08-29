@@ -8,6 +8,7 @@ const {
   numOr,
   signAmount,
   categoryIdByName,
+  isCategorizedSpend,
   startOfWeek,
   budgetWindow,
   budgetTransactionsInWindow,
@@ -235,6 +236,22 @@ test('budgetTransactionsInWindow excludes transactions outside the window', () =
   assert.equal(result.length, 0);
 });
 
+test('budgetTransactionsInWindow includes an in-window transfer categorized for this budget, not one left as the generic "Transfer" category', () => {
+  const now = new Date();
+  const thisMonth = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().slice(0, 10);
+  const categories = [
+    { id: 'insurance', name: 'Insurance', parentId: null },
+    { id: 'transfer-cat', name: 'Transfer', parentId: null },
+  ];
+  const budget = { id: 'budget-1', categoryId: 'insurance', period: 'monthly' };
+  const transactions = [
+    { id: 't1', type: 'transfer', categoryId: 'insurance', amount: 4000, date: thisMonth, fromAccountId: 'a', toAccountId: 'b' },
+    { id: 't2', type: 'transfer', categoryId: 'transfer-cat', amount: 500, date: thisMonth, fromAccountId: 'a', toAccountId: 'c' },
+  ];
+  const result = budgetTransactionsInWindow(budget, transactions, categories);
+  assert.deepEqual(result.map((t) => t.id), ['t1']);
+});
+
 test('computeBudgetSpent sums the absolute value of in-window expense transactions', () => {
   const now = new Date();
   const thisMonth = now.toISOString().slice(0, 10);
@@ -277,4 +294,33 @@ test('categorySpendForMonth returns an empty map when nothing falls in the given
   const transactions = [{ type: 'expense', categoryId: 'cat-1', amount: -20, date: '2026-01-05' }];
   const map = categorySpendForMonth(transactions, categories, 2026, 5);
   assert.equal(map.size, 0);
+});
+
+test('isCategorizedSpend counts a plain expense regardless of category', () => {
+  assert.equal(isCategorizedSpend({ type: 'expense', categoryId: null }, 'transfer-cat'), true);
+  assert.equal(isCategorizedSpend({ type: 'expense', categoryId: 'food' }, 'transfer-cat'), true);
+});
+
+test('isCategorizedSpend counts a transfer only when it carries a category other than the generic "Transfer" one', () => {
+  assert.equal(isCategorizedSpend({ type: 'transfer', categoryId: 'health-insurance' }, 'transfer-cat'), true);
+  assert.equal(isCategorizedSpend({ type: 'transfer', categoryId: 'transfer-cat' }, 'transfer-cat'), false);
+  assert.equal(isCategorizedSpend({ type: 'transfer', categoryId: null }, 'transfer-cat'), false);
+});
+
+test('isCategorizedSpend excludes income', () => {
+  assert.equal(isCategorizedSpend({ type: 'income', categoryId: 'salary' }, 'transfer-cat'), false);
+});
+
+test('categorySpendForMonth includes a transfer-type bill payment tagged with a real category, but not one left as a plain "Transfer"', () => {
+  const categories = [
+    { id: 'insurance', name: 'Insurance', parentId: null },
+    { id: 'transfer-cat', name: 'Transfer', parentId: null },
+  ];
+  const transactions = [
+    { type: 'transfer', categoryId: 'insurance', amount: 4000, date: '2026-08-08', fromAccountId: 'a', toAccountId: 'b' },
+    { type: 'transfer', categoryId: 'transfer-cat', amount: 500, date: '2026-08-08', fromAccountId: 'a', toAccountId: 'c' },
+  ];
+  const map = categorySpendForMonth(transactions, categories, 2026, 7); // August = month index 7
+  assert.equal(map.get('insurance'), 4000);
+  assert.equal(map.has('transfer-cat'), false);
 });

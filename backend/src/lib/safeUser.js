@@ -5,7 +5,7 @@ const plans = require('../plans');
 // plan, healthScore, healthGrade, twoFactorEnabled, biometricEnabled) —
 // email now comes from the verified Supabase Auth user, everything else
 // from the profiles row.
-function buildSafeUser(userId, email, profile, impersonation, isAdmin) {
+function buildSafeUser(userId, email, profile, impersonation, isAdmin, subscription) {
   const planConfig = plans.getPlanConfig(profile?.plan);
   return {
     id: userId,
@@ -48,6 +48,11 @@ function buildSafeUser(userId, email, profile, impersonation, isAdmin) {
     // ever a UI-visibility signal, never an authorization decision (see
     // requireAuth's comment on req.isAdmin).
     isAdmin: !!isAdmin,
+    // Resolved subscription/free-trial shape (services/subscriptionService.js
+    // toApiShape) — { status, type, trialStartDate, trialEndDate,
+    // subscriptionStartDate, subscriptionEndDate, daysRemaining }. Additive:
+    // null when the caller didn't resolve it (older callers / not applicable).
+    subscription: subscription || null,
   };
 }
 

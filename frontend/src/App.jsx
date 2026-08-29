@@ -30,6 +30,7 @@ const Reports = lazy(() => import('./pages/Reports.jsx'));
 const Notifications = lazy(() => import('./pages/Notifications.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const MyFeedback = lazy(() => import('./pages/MyFeedback.jsx'));
+const Subscription = lazy(() => import('./pages/Subscription.jsx'));
 
 function RouteFallback() {
   return (
@@ -80,6 +81,7 @@ function AppRoutes() {
         <Route path="notifications" element={<Suspense fallback={<RouteFallback />}><Notifications /></Suspense>} />
         <Route path="feedback" element={<Suspense fallback={<RouteFallback />}><MyFeedback /></Suspense>} />
         <Route path="settings" element={<Suspense fallback={<RouteFallback />}><Settings /></Suspense>} />
+        <Route path="subscription" element={<Suspense fallback={<RouteFallback />}><Subscription /></Suspense>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

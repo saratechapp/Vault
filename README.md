@@ -27,7 +27,7 @@ So in production there is one API host (Render) that also serves the admin UI at
 ```bash
 cd backend && npm install
 cd ../frontend && npm install
-# backend/admin deps are installed automatically on the first `npm run dev`
+# backend/admin (the Super Admin SPA) deps are installed automatically on the first `npm run dev`
 ```
 
 Terminal 1 — backend **+ Super Admin** (one command, one server):
@@ -52,9 +52,10 @@ npm run dev
 
 Open http://localhost:5173 and sign up with any name/email/password.
 
-> Optional: to iterate on the admin UI with hot-module reload instead of a
-> full rebuild-on-save, also run `cd backend/admin && npm run dev` and open
-> http://localhost:5174/superadmin/ — never required.
+The Super Admin panel has no dev server of its own: `npm run dev` in `backend/`
+runs `vite build --watch` (a compiler, not a server) and the Express server serves
+the result. Edits to `backend/admin/` trigger a rebuild + full page reload at
+http://localhost:4000/superadmin/ — there is no second port and no second command.
 
 ## Production build
 

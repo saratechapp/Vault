@@ -165,6 +165,16 @@ export const notificationsApi = {
 // ---- reports ----
 export const reportsApi = { get: () => api.get('/reports') };
 
+// ---- subscription / free trial + pricing ----
+// GET returns the status shape ({ status, type, trial*, daysRemaining }) that
+// also rides on /api/me's `user.subscription`, PLUS `enforcementEnabled` and a
+// `pricing` block (admin-configured per-currency prices; never FX-converted).
+// `locale` (navigator.language) feeds the currency-detection fallback.
+export const subscriptionApi = {
+  get: (locale) => api.get(`/subscription${locale ? `?locale=${encodeURIComponent(locale)}` : ''}`),
+  setCurrency: (currency) => api.patch('/subscription/currency', { currency }),
+};
+
 // ---- AI insights ----
 export const aiApi = {
   insights: () => api.get('/ai/insights'),

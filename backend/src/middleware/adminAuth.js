@@ -64,4 +64,15 @@ function requirePermission(module, action) {
   };
 }
 
-module.exports = { requireAdminAuth, requirePermission };
+// Stricter than any single permission — the action is reserved for the
+// is_system "Super Admin" role, no matter what a custom role has been
+// granted. Used for the global free-trial settings write (the spec's "only
+// the authorized Super Admin can change subscription configuration"), so a
+// Finance/Support admin with subscriptions:view still can't flip it.
+function requireSuperAdmin(req, res, next) {
+  if (!req.admin) return res.status(401).json({ error: 'unauthorized' });
+  if (!req.admin.isSuperAdmin) return res.status(403).json({ error: 'forbidden' });
+  return next();
+}
+
+module.exports = { requireAdminAuth, requirePermission, requireSuperAdmin };

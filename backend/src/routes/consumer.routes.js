@@ -20,6 +20,7 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { requireFeature, assertUnderLimit } = require('../middleware/planGuards');
 const { sendJSON, bumpCache } = require('../lib/httpCache');
 const { buildSafeUser } = require('../lib/safeUser');
+const { countryFromHeaders } = require('../lib/geoIp');
 const { ownsAccount, foreignAccountField } = require('../lib/ownership');
 const { isValidDateStr, emptyToNull, advanceDate } = require('../lib/validation');
 const {
@@ -168,13 +169,60 @@ router.get('/api/health', (req, res) => {
 
 router.get('/api/me', requireAuth, ah(async (req, res) => {
   const profile = await db.getProfile(req.userId);
-  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin);
+  const subscription = await db.resolveForUser(req.userId, profile);
+  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin, subscription);
   // Per-device 2FA step-up state (not part of buildSafeUser's normal shape,
   // which is user-scoped, not session-scoped) — lets the mobile app decide
   // whether to hold on the post-login TwoFactorScreen without needing its
   // own separate tracking of "did I already verify this session".
   user.twoFactorVerified = !req.userData.twoFactorEnabled || !!req.currentSession?.twoFactorVerifiedAt;
   res.json({ user });
+}));
+
+// The current user's resolved subscription status + the location-aware
+// pricing block (admin-configured per-currency prices — never FX-converted).
+// The profile drawer only reads the status fields; the /app/subscription
+// page uses `pricing` too. `?locale=` carries navigator.language for the
+// browser-locale fallback step of currency resolution.
+router.get('/api/subscription', requireAuth, ah(async (req, res) => {
+  const profile = await db.getProfile(req.userId);
+  const settings = await db.getSubscriptionSettings();
+  const [status, pricing] = await Promise.all([
+    db.resolveForUser(req.userId, profile),
+    db.resolvePricingForUser(profile, {
+      localeHint: req.query.locale,
+      ipCountry: countryFromHeaders(req),
+      settings,
+    }),
+  ]);
+  res.json({
+    ...status,
+    enforcementEnabled: settings.enforcementEnabled,
+    // Drives the "Free" plan card on /app/subscription — whether new signups
+    // get a trial and for how long. The user's own live trial state is in
+    // `status` (status / trialStartDate / trialEndDate / daysRemaining).
+    trial: { enabled: settings.trialEnabled, durationMonths: settings.trialDurationMonths },
+    pricing,
+  });
+}));
+
+// Manual currency override from the Subscription page selector. Persists to
+// profiles.billing_currency (NOT profiles.currency — app-wide money
+// formatting is unaffected). Only an enabled pricing currency is accepted.
+router.patch('/api/subscription/currency', requireAuth, ah(async (req, res) => {
+  const raw = (req.body && req.body.currency) || '';
+  const currency = String(raw).toUpperCase().trim();
+  if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'invalid_currency' });
+  const prices = await db.getSubscriptionPrices();
+  if (!prices.some((p) => p.enabled && p.currency === currency)) {
+    return res.status(400).json({ error: 'currency_not_available' });
+  }
+  const profile = await db.updateProfile(req.userId, { billingCurrency: currency });
+  const pricing = await db.resolvePricingForUser(profile, {
+    localeHint: req.query.locale,
+    ipCountry: countryFromHeaders(req),
+  });
+  res.json({ pricing });
 }));
 
 router.patch('/api/me', requireAuth, ah(async (req, res) => {
@@ -281,7 +329,8 @@ router.patch('/api/me', requireAuth, ah(async (req, res) => {
     patch.reminderSettings = body.reminderSettings;
   }
   const profile = Object.keys(patch).length ? await db.updateProfile(req.userId, patch) : await db.getProfile(req.userId);
-  res.json(buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin));
+  const subscription = await db.resolveForUser(req.userId, profile);
+  res.json(buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin, subscription));
 }));
 
 // Marks this account as having a working password — called by the frontend
@@ -525,7 +574,8 @@ router.post('/api/impersonation/end', requireAuth, ah(async (req, res) => {
 router.get('/api/dashboard', requireAuth, ah(async (req, res) => {
   const userData = req.userData;
   const profile = await db.getProfile(req.userId);
-  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin);
+  const subscription = await db.resolveForUser(req.userId, profile);
+  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin, subscription);
   const accounts = computeAccounts(userData);
   const metrics = buildMetrics(userData, accounts);
   const spendingTrend = buildTagTrend(userData.transactions, 7);
@@ -933,7 +983,13 @@ router.post('/api/bills', requireAuth, ah(async (req, res) => {
   const bill = await db.insertBill(req.userId, {
     name: b.name, type, amount: Number(b.amount),
     dueDate: b.dueDate, frequency, status: b.status || 'pending',
-    category: b.category || '', categoryId: type === 'transfer' ? categoryIdByName(req.userData.categories, 'Transfer') : b.categoryId || null, vendor: b.vendor || '',
+    // A transfer bill defaults to the generic "Transfer" category, but a
+    // caller-supplied categoryId wins — e.g. a bill paid by moving money to
+    // a dedicated account, tagged with a real category ("Health Insurance")
+    // so it still counts as that category's spend in Reports/budgets (see
+    // isCategorizedSpend, services/shared.js) instead of disappearing into
+    // an untracked transfer.
+    category: b.category || '', categoryId: b.categoryId || (type === 'transfer' ? categoryIdByName(req.userData.categories, 'Transfer') : null), vendor: b.vendor || '',
     paymentMethod: b.paymentMethod || '', note: b.note || '', labels: Array.isArray(b.labels) ? b.labels : [],
     active: b.active !== undefined ? !!b.active : true,
     ...(type === 'transfer'
@@ -986,10 +1042,15 @@ router.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
       bill[f] = value;
     }
   });
-  if (nextType === 'transfer') {
-    const transferCategoryId = categoryIdByName(req.userData.categories, 'Transfer');
-    bill.categoryId = transferCategoryId;
-    patch.categoryId = transferCategoryId;
+  // Only falls back to the generic "Transfer" category when this save
+  // didn't leave the bill with a real one of its own — a categoryId already
+  // on the bill (or explicitly sent in this request, e.g. "Health
+  // Insurance") is preserved rather than clobbered, so a per-payment PATCH
+  // like Mark as Paid (which never touches category at all) can't silently
+  // reset a transfer bill's category on every single payment.
+  if (nextType === 'transfer' && !bill.categoryId) {
+    bill.categoryId = categoryIdByName(req.userData.categories, 'Transfer');
+    patch.categoryId = bill.categoryId;
   }
   // Every bill now requires an explicit human "Mark as Paid" confirmation —
   // there's no more automatic engine that could have already posted this
@@ -1474,7 +1535,8 @@ router.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('c
 // app's Google Drive backup — not a restore/import path, read-only) ----
 router.get('/api/export', requireAuth, ah(async (req, res) => {
   const profile = await db.getProfile(req.userId);
-  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin);
+  const subscription = await db.resolveForUser(req.userId, profile);
+  const user = buildSafeUser(req.userId, req.userEmail, profile, req.impersonation, req.isAdmin, subscription);
   sendJSON(req, res, {
     version: 1,
     exportedAt: new Date().toISOString(),

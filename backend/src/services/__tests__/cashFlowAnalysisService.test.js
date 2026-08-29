@@ -57,6 +57,24 @@ test('computeTopSpendingCategories sums expense-only, sorts descending, and resp
   assert.equal(capped[0].categoryId, 'c1');
 });
 
+test('computeTopSpendingCategories includes a transfer-type bill payment tagged with a real category, but excludes a plain "Transfer"-categorized one', () => {
+  const categories = [
+    { id: 'c1', name: 'Rent', color: '#111' },
+    { id: 'transfer-cat', name: 'Transfer', color: '#333' },
+  ];
+  const userData = {
+    categories,
+    transactions: [
+      { type: 'expense', categoryId: 'c1', amount: -1500 },
+      { type: 'transfer', categoryId: 'c1', amount: 4000, fromAccountId: 'a', toAccountId: 'b' },
+      { type: 'transfer', categoryId: 'transfer-cat', amount: 500, fromAccountId: 'a', toAccountId: 'c' },
+    ],
+  };
+  const result = computeTopSpendingCategories(userData);
+  assert.deepEqual(result.map((c) => c.categoryId), ['c1']);
+  assert.equal(result[0].amount, 5500);
+});
+
 test('computeTopMerchants excludes debt-payment-labeled expenses and non-expense transactions', () => {
   const userData = {
     transactions: [

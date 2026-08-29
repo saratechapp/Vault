@@ -141,6 +141,43 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
+  // Passwordless email signup, step 1: emails a 6-digit code and creates the
+  // (unconfirmed, password-less) account. No session is returned here — the
+  // caller must collect the code and call verifyEmailOtp. Deliberately NOT
+  // signUp({ password }): a password must only ever be set *after* a valid
+  // code has been confirmed (see /create-password), so it isn't even
+  // collected until then.
+  const startEmailSignup = useCallback(async (email) => {
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    });
+    if (error) throw new Error(error.message);
+  }, []);
+
+  // Step 2: confirms the 6-digit code (type: 'email'). Only on success is a
+  // session established. The account still has no password (profiles
+  // .has_password defaults false and nothing has set it), so needsPassword
+  // becomes true and the caller/routing sends the new user to
+  // /create-password — the same mandatory step OAuth signups go through.
+  // No /api/me/password-set call here, precisely so that stays true.
+  const verifyEmailOtp = useCallback(async (email, token) => {
+    const { data, error } = await supabase.auth.verifyOtp({ email, token, type: 'email' });
+    if (error) throw new Error(error.message);
+    setSession(data.session);
+    return data.user;
+  }, []);
+
+  // Re-sends the code — same call as startEmailSignup. Supabase rate-limits
+  // this (~60s); the caller gates it behind its own cooldown too.
+  const resendEmailOtp = useCallback(async (email) => {
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    });
+    if (error) throw new Error(error.message);
+  }, []);
+
   // Lets an already-signed-in user (however they got in) attach a password
   // to their account — the mandatory step right after first OAuth signup,
   // or a voluntary "set/change password" from Settings later.
@@ -197,10 +234,11 @@ export function AuthProvider({ children }) {
   const value = useMemo(
     () => ({
       user, userId, isAuthed: !!session, ready, needsPassword, impersonation,
-      loginWithOAuth, loginWithPassword, setAccountPassword, sendPasswordReset, setRememberMe,
+      loginWithOAuth, loginWithPassword, startEmailSignup, verifyEmailOtp, resendEmailOtp,
+      setAccountPassword, sendPasswordReset, setRememberMe,
       logout, exitImpersonation, setUser,
     }),
-    [user, userId, session, ready, needsPassword, impersonation, loginWithOAuth, loginWithPassword, setAccountPassword, sendPasswordReset, setRememberMe, logout, exitImpersonation]
+    [user, userId, session, ready, needsPassword, impersonation, loginWithOAuth, loginWithPassword, startEmailSignup, verifyEmailOtp, resendEmailOtp, setAccountPassword, sendPasswordReset, setRememberMe, logout, exitImpersonation]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

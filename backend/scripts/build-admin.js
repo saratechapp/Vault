@@ -4,15 +4,12 @@
 // Usage: npm run build   (from backend/)  — Render runs this at deploy time.
 //
 // The admin bundle needs two PUBLIC Supabase values inlined at build time:
-// VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY. Rather than a second
-// backend/admin/.env, this script sources them from the single backend
+// VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY. There is no separate
+// backend/admin/.env — this script sources them from the single backend
 // config: process.env (already populated on Render / CI) with a fallback to
 // backend/.env via dotenv for local builds. Vite picks up any VITE_*-prefixed
 // var already present in process.env, so passing them through to the child
 // process is enough — no file is written.
-//
-// backend/admin/.env is kept only as a convenience for running the admin app
-// standalone (`npm --prefix admin run dev`); it is not consulted here.
 
 require('dotenv').config(); // loads backend/.env when present; no-op otherwise
 const { execFileSync } = require('child_process');

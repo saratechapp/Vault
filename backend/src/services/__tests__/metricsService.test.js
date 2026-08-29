@@ -219,6 +219,23 @@ test('buildCategorySpend sorts results by amount descending', () => {
   assert.deepEqual(result.map((r) => r.categoryId), ['big', 'small']);
 });
 
+test('buildCategorySpend accumulates a transfer-type bill payment into its own real category alongside plain expenses in that category, but excludes a transfer left as the generic "Transfer" category', () => {
+  const now = new Date();
+  const thisMonth = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().slice(0, 10);
+  const categories = [
+    { id: 'insurance', name: 'Insurance', parentId: null },
+    { id: 'transfer-cat', name: 'Transfer', parentId: null },
+  ];
+  const transactions = [
+    { type: 'expense', categoryId: 'insurance', amount: -11525.67, date: thisMonth },
+    { type: 'transfer', categoryId: 'insurance', amount: 4000, date: thisMonth, fromAccountId: 'a', toAccountId: 'b' },
+    { type: 'transfer', categoryId: 'transfer-cat', amount: 500, date: thisMonth, fromAccountId: 'a', toAccountId: 'c' },
+  ];
+  const result = buildCategorySpend(transactions, categories);
+  assert.deepEqual(result.map((r) => r.categoryId), ['insurance']);
+  assert.equal(result[0].amount, 15525.67);
+});
+
 test('buildMetrics computes savingsRate, deltas vs. the prior month, and netWorth from accounts minus debts', () => {
   const now = new Date();
   const thisMonth = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().slice(0, 10);

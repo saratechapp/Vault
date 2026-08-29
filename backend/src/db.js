@@ -1,5 +1,7 @@
 const { supabase } = require('./supabaseClient');
 const { rowToCamel, rowsToCamel, camelToSnakePatch } = require('./lib/supabaseMapper');
+const subscriptionService = require('./services/subscriptionService');
+const currencyService = require('./services/currencyService');
 
 // ---------------------------------------------------------------------------
 // field maps: [snake_case column, camelCase field] pairs per table. Shared by
@@ -55,6 +57,41 @@ const PROFILE_FIELDS = [
   ['date_of_birth', 'dateOfBirth'], ['timezone', 'timezone'],
   ['theme_mode', 'themeMode'], ['language', 'language'], ['week_start', 'weekStart'],
   ['time_format', 'timeFormat'], ['haptic_enabled', 'hapticEnabled'], ['reminder_settings', 'reminderSettings'],
+  // Subscription / free-trial (0025_subscriptions.sql). `subscription_type`
+  // is the stored intent; the live status is derived from these dates by
+  // services/subscriptionService.js.
+  ['subscription_type', 'subscriptionType'], ['trial_started_at', 'trialStartedAt'],
+  ['trial_ends_at', 'trialEndsAt'], ['subscription_started_at', 'subscriptionStartedAt'],
+  ['subscription_ends_at', 'subscriptionEndsAt'], ['subscription_updated_at', 'subscriptionUpdatedAt'],
+  // Subscription pricing (0026_subscription_pricing.sql). `billingCurrency` is
+  // the user's chosen subscription-display currency, deliberately separate
+  // from `currency` (app-wide money formatting). The last three are the
+  // price-at-purchase record a future payment flow will write.
+  ['billing_currency', 'billingCurrency'], ['subscription_currency', 'subscriptionCurrency'],
+  ['subscription_price_at_purchase', 'subscriptionPriceAtPurchase'],
+  ['subscription_billing_period', 'subscriptionBillingPeriod'],
+];
+
+const SUBSCRIPTION_SETTINGS_FIELDS = [
+  ['trial_enabled', 'trialEnabled'], ['trial_duration_months', 'trialDurationMonths'],
+  ['enforcement_started_at', 'enforcementStartedAt'],
+  ['enforcement_enabled', 'enforcementEnabled'], ['default_currency', 'defaultCurrency'],
+  ['updated_at', 'updatedAt'], ['updated_by', 'updatedBy'],
+];
+
+const SUBSCRIPTION_SETTINGS_DEFAULTS = Object.freeze({
+  trialEnabled: false,
+  trialDurationMonths: 1,
+  enforcementStartedAt: null,
+  enforcementEnabled: false,
+  defaultCurrency: 'INR',
+  updatedAt: null,
+  updatedBy: null,
+});
+
+const SUBSCRIPTION_PRICE_FIELDS = [
+  ['currency', 'currency'], ['monthly_price', 'monthlyPrice'], ['yearly_price', 'yearlyPrice'],
+  ['enabled', 'enabled'], ['updated_at', 'updatedAt'], ['updated_by', 'updatedBy'],
 ];
 // Sessions (mobile Settings > Security > Sessions) — one row per
 // app-install/login, distinct from the append-only `login_events` history
@@ -293,6 +330,257 @@ async function updateProfile(userId, patch) {
 }
 
 // ---------------------------------------------------------------------------
+// subscription / free-trial (0025_subscriptions.sql)
+// ---------------------------------------------------------------------------
+
+// Overlay only the keys the row actually provided — so a column added by a
+// not-yet-applied migration (0026's enforcement_enabled / default_currency
+// while only 0025 is live) reads back `undefined` from rowToCamel and must
+// NOT clobber its default.
+function withDefaults(defaults, mapped) {
+  const out = { ...defaults };
+  for (const [k, v] of Object.entries(mapped || {})) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
+// The single global settings row. Degrades to safe "trial system off"
+// defaults if the table isn't there yet (0025 not applied) — same tolerance
+// as getSessionBySessionId for 0022.
+async function getSubscriptionSettings() {
+  try {
+    const { data, error } = await supabase
+      .from('subscription_settings').select('*').eq('id', true).maybeSingle();
+    if (error) throw error;
+    if (!data) return { ...SUBSCRIPTION_SETTINGS_DEFAULTS };
+    return withDefaults(SUBSCRIPTION_SETTINGS_DEFAULTS, rowToCamel(data, SUBSCRIPTION_SETTINGS_FIELDS));
+  } catch (err) {
+    if (isMissingTableError(err)) return { ...SUBSCRIPTION_SETTINGS_DEFAULTS };
+    throw err;
+  }
+}
+
+// Super-Admin-only write (route enforces requireSuperAdmin). `enforcement
+// _started_at` is stamped exactly once — the first time the trial system is
+// switched on — because it's the grandfather cutoff every later resolution
+// keys off; flipping the toggle off and on again must not move it.
+async function updateSubscriptionSettings(patch, updatedBy) {
+  const current = await getSubscriptionSettings();
+  const next = {
+    trialEnabled: patch.trialEnabled !== undefined ? !!patch.trialEnabled : current.trialEnabled,
+    trialDurationMonths:
+      patch.trialDurationMonths !== undefined
+        ? Math.min(12, Math.max(1, Number(patch.trialDurationMonths) || 1))
+        : current.trialDurationMonths,
+    enforcementEnabled:
+      patch.enforcementEnabled !== undefined ? !!patch.enforcementEnabled : current.enforcementEnabled,
+    defaultCurrency:
+      patch.defaultCurrency !== undefined
+        ? String(patch.defaultCurrency).toUpperCase()
+        : current.defaultCurrency,
+  };
+  // A default currency must have an enabled price row to fall back to.
+  if (patch.defaultCurrency !== undefined) {
+    const prices = await getSubscriptionPrices();
+    const ok = prices.some((p) => p.enabled && p.currency === next.defaultCurrency);
+    if (!ok) {
+      const err = new Error('default_currency_not_priced');
+      err.code = 'DEFAULT_CURRENCY_NOT_PRICED';
+      throw err;
+    }
+  }
+  let enforcementStartedAt = current.enforcementStartedAt;
+  if (next.trialEnabled && !enforcementStartedAt) enforcementStartedAt = new Date().toISOString();
+
+  const row = {
+    id: true,
+    trial_enabled: next.trialEnabled,
+    trial_duration_months: next.trialDurationMonths,
+    enforcement_started_at: enforcementStartedAt,
+    enforcement_enabled: next.enforcementEnabled,
+    default_currency: next.defaultCurrency,
+    updated_at: new Date().toISOString(),
+    updated_by: updatedBy || null,
+  };
+  let { data, error } = await supabase
+    .from('subscription_settings').upsert(row).select().maybeSingle();
+  // 0026's columns (enforcement_enabled / default_currency, always added
+  // together) not applied yet — drop both and retry so the pre-0026 trial
+  // toggle still saves. Same spirit as updateProfile's degradation for
+  // 0019/0020.
+  if (error && isMissingColumnError(error)) {
+    const { enforcement_enabled, default_currency, ...pre0026 } = row;
+    ({ data, error } = await supabase.from('subscription_settings').upsert(pre0026).select().maybeSingle());
+  }
+  if (error) throw error;
+  return withDefaults(SUBSCRIPTION_SETTINGS_DEFAULTS, rowToCamel(data, SUBSCRIPTION_SETTINGS_FIELDS));
+}
+
+// Resolve (and, on first touch, persist) a user's subscription record, then
+// return the API shape. Self-healing: a profile whose subscription_type is
+// still null gets its initial record written now, exactly like the
+// has_password backfill. Never throws on a not-yet-applied 0025 — falls back
+// to a computed FREE_ACCESS shape.
+async function resolveForUser(userId, profileRow) {
+  const now = new Date();
+  const profile = profileRow || (await getProfile(userId));
+
+  if (profile && profile.subscriptionType) {
+    return subscriptionService.toApiShape(
+      {
+        type: profile.subscriptionType,
+        trialStartedAt: profile.trialStartedAt,
+        trialEndsAt: profile.trialEndsAt,
+        subscriptionStartedAt: profile.subscriptionStartedAt,
+        subscriptionEndsAt: profile.subscriptionEndsAt,
+      },
+      now
+    );
+  }
+
+  const settings = await getSubscriptionSettings();
+  const initial = subscriptionService.resolveInitialSubscription({
+    profileCreatedAt: profile?.memberSince || now,
+    settings,
+    now,
+  });
+
+  try {
+    await updateProfile(userId, {
+      subscriptionType: initial.type,
+      trialStartedAt: initial.trialStartedAt ? initial.trialStartedAt.toISOString() : null,
+      trialEndsAt: initial.trialEndsAt ? initial.trialEndsAt.toISOString() : null,
+      subscriptionUpdatedAt: now.toISOString(),
+    });
+  } catch (err) {
+    // 0025 not applied yet — return the computed shape without persisting
+    // rather than 500ing every authenticated request.
+    if (!isMissingColumnError(err) && !isMissingTableError(err)) throw err;
+  }
+
+  return subscriptionService.toApiShape(initial, now);
+}
+
+// ---------------------------------------------------------------------------
+// subscription pricing (0026_subscription_pricing.sql) — admin-configured
+// per-currency prices; NO FX conversion anywhere.
+// ---------------------------------------------------------------------------
+// Thrown by the pricing writers when 0026_subscription_pricing.sql hasn't
+// been applied — the admin routes turn this into a clear 409 instead of a
+// raw 500. Reads (getSubscriptionPrices) just degrade to [].
+function pricingNotMigratedError() {
+  const err = new Error('subscription_prices table not found — apply 0026_subscription_pricing.sql');
+  err.code = 'PRICING_NOT_MIGRATED';
+  return err;
+}
+
+async function subscriptionPricingMigrated() {
+  const { error } = await supabase.from('subscription_prices').select('currency', { head: true, count: 'exact' });
+  if (!error) return true;
+  if (isMissingTableError(error)) return false;
+  throw error;
+}
+
+async function getSubscriptionPrices() {
+  try {
+    const { data, error } = await supabase
+      .from('subscription_prices').select('*').order('currency', { ascending: true });
+    if (error) throw error;
+    return rowsToCamel(data || [], SUBSCRIPTION_PRICE_FIELDS).map((r) => ({
+      ...r,
+      monthlyPrice: Number(r.monthlyPrice) || 0,
+      yearlyPrice: Number(r.yearlyPrice) || 0,
+    }));
+  } catch (err) {
+    if (isMissingTableError(err)) return [];
+    throw err;
+  }
+}
+
+async function upsertSubscriptionPrice(currency, { monthlyPrice, yearlyPrice, enabled }, updatedBy) {
+  const row = {
+    currency: String(currency).toUpperCase(),
+    monthly_price: Math.max(0, Number(monthlyPrice) || 0),
+    yearly_price: Math.max(0, Number(yearlyPrice) || 0),
+    enabled: enabled === undefined ? true : !!enabled,
+    updated_at: new Date().toISOString(),
+    updated_by: updatedBy || null,
+  };
+  const { data, error } = await supabase
+    .from('subscription_prices').upsert(row, { onConflict: 'currency' }).select().maybeSingle();
+  if (error) {
+    if (isMissingTableError(error)) throw pricingNotMigratedError();
+    throw error;
+  }
+  const mapped = rowToCamel(data, SUBSCRIPTION_PRICE_FIELDS);
+  return { ...mapped, monthlyPrice: Number(mapped.monthlyPrice) || 0, yearlyPrice: Number(mapped.yearlyPrice) || 0 };
+}
+
+async function deleteSubscriptionPrice(currency) {
+  const { error } = await supabase
+    .from('subscription_prices').delete().eq('currency', String(currency).toUpperCase());
+  if (error) {
+    if (isMissingTableError(error)) throw pricingNotMigratedError();
+    throw error;
+  }
+}
+
+// The `pricing` block returned on GET /api/subscription and PATCH
+// /api/subscription/currency. Pure assembly on top of the config reads + the
+// currencyService resolver; no per-user DB write. `settings` may be passed in
+// to avoid a duplicate single-row read when the caller already has it.
+async function resolvePricingForUser(profile, { localeHint, ipCountry, settings } = {}) {
+  const [prices, resolvedSettings] = await Promise.all([
+    getSubscriptionPrices(),
+    settings ? Promise.resolve(settings) : getSubscriptionSettings(),
+  ]);
+  const enabledRows = prices.filter((p) => p.enabled);
+  const enabledCurrencies = enabledRows.map((p) => p.currency);
+  const defaultCurrency = enabledCurrencies.includes(resolvedSettings.defaultCurrency)
+    ? resolvedSettings.defaultCurrency
+    : (enabledCurrencies[0] || 'INR');
+
+  const { currency, source } = currencyService.resolveCurrency({
+    billingCurrency: profile?.billingCurrency,
+    profileCurrency: profile?.currency,
+    profileCountry: profile?.country,
+    ipCountry,
+    localeHint,
+    enabledCurrencies,
+    defaultCurrency,
+  });
+
+  const shapeRow = (p) => {
+    const yEq = currencyService.yearlyEquivalentMonthly(p.yearlyPrice);
+    return {
+      code: p.currency,
+      symbol: currencyService.currencyMeta(p.currency).symbol,
+      name: currencyService.currencyMeta(p.currency).name,
+      monthly: p.monthlyPrice,
+      yearly: p.yearlyPrice,
+      monthlyFormatted: currencyService.formatMoney(p.monthlyPrice, p.currency),
+      yearlyFormatted: currencyService.formatMoney(p.yearlyPrice, p.currency),
+      yearlySavingsPct: currencyService.yearlySavingsPct(p.monthlyPrice, p.yearlyPrice),
+      yearlyEquivalentMonthly: yEq,
+      yearlyEquivalentMonthlyFormatted: currencyService.formatMoney(yEq, p.currency),
+    };
+  };
+
+  const currencies = enabledRows.map(shapeRow);
+  const selected = currencies.find((c) => c.code === currency) || currencies[0] || null;
+
+  return {
+    currency: selected?.code || currency,
+    source,
+    defaultCurrency,
+    configured: enabledRows.length > 0,
+    currencies,
+    selected,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // notification overlay — sparse read/dismissed state for the generated
 // notification rows computeGeneratedRows() derives live from bills/budgets/
 // goals/transactions on every request. Returned in the same shape the old
@@ -504,6 +792,14 @@ module.exports = {
   getBills,
   getProfile,
   updateProfile,
+  getSubscriptionSettings,
+  updateSubscriptionSettings,
+  resolveForUser,
+  getSubscriptionPrices,
+  upsertSubscriptionPrice,
+  deleteSubscriptionPrice,
+  subscriptionPricingMigrated,
+  resolvePricingForUser,
   getNotificationOverlay,
   upsertNotificationOverlay,
   markAllNotificationsRead,

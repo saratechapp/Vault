@@ -16,6 +16,11 @@ const MODULES = {
   rbac: { label: 'Roles & Permissions', actions: ['view', 'edit'] },
   feedback: { label: 'Feedback', actions: ['view', 'edit', 'assign', 'delete'] },
   auditLogs: { label: 'Audit Logs', actions: ['view'] },
+  // `view` gates the Subscriptions page + user list; changing the global
+  // free-trial settings additionally requires the is_system Super Admin role
+  // (requireSuperAdmin in routes/admin/subscriptions.js), so `manage` here is
+  // effectively Super-Admin-only in practice.
+  subscriptions: { label: 'Subscriptions', actions: ['view', 'manage'] },
 };
 
 const VALID_PAIRS = new Set();

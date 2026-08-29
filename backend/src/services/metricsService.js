@@ -1,4 +1,4 @@
-const { sortTransactionsRecentFirst, round1 } = require('./shared');
+const { sortTransactionsRecentFirst, round1, categoryIdByName, isCategorizedSpend } = require('./shared');
 
 // ---------------------------------------------------------------------------
 // derived analytics — core ledger/rollup primitives shared by every other
@@ -159,9 +159,10 @@ function buildTagTrend(transactions, months = 7) {
 function buildCategorySpend(transactions, categories) {
   const now = new Date();
   const topLevelIdOf = new Map(categories.map((c) => [c.id, c.parentId || c.id]));
+  const transferCategoryId = categoryIdByName(categories, 'Transfer');
   const map = new Map();
   transactions.forEach((t) => {
-    if (t.type !== 'expense') return;
+    if (!isCategorizedSpend(t, transferCategoryId)) return;
     const d = new Date(t.date);
     if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return;
     const topId = topLevelIdOf.get(t.categoryId) || null;
