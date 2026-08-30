@@ -3,12 +3,30 @@ import { DataGrid } from '@mui/x-data-grid';
 import {
   Box, Typography, Tabs, Tab, Paper, Grid, Chip, Button, Alert, Switch,
   FormControlLabel, TextField, MenuItem, Stack, Divider, Snackbar,
-  Table, TableBody, TableCell, TableHead, TableRow, IconButton,
+  Table, TableBody, TableCell, TableHead, TableRow, IconButton, Autocomplete,
 } from '@mui/material';
+import { createFilterOptions } from '@mui/material/Autocomplete';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import { api } from '../../lib/api.js';
 import { useAdminAuth } from '../../context/AdminAuthContext.jsx';
 import { hasPermission } from '../../lib/permissions.js';
+
+// Country / common-name search aliases for the "Add a currency" picker, so
+// typing "uk", "america", "dubai" etc. finds the right ISO 4217 code (the
+// option label is only "GBP — British Pound", which "uk" wouldn't match).
+const CURRENCY_SEARCH_ALIASES = {
+  INR: 'india indian', USD: 'us usa united states america', GBP: 'uk united kingdom britain british england sterling',
+  EUR: 'eu europe eurozone germany france spain italy ireland netherlands portugal', AED: 'uae united arab emirates dubai abu dhabi',
+  SAR: 'saudi arabia ksa riyal', QAR: 'qatar', KWD: 'kuwait', BHD: 'bahrain', OMR: 'oman',
+  AUD: 'australia australian aussie', CAD: 'canada canadian', SGD: 'singapore', HKD: 'hong kong',
+  NZD: 'new zealand', JPY: 'japan japanese yen', CNY: 'china chinese yuan renminbi rmb', CHF: 'switzerland swiss franc',
+  ZAR: 'south africa rand', MYR: 'malaysia ringgit', IDR: 'indonesia rupiah', PHP: 'philippines peso',
+  THB: 'thailand baht', VND: 'vietnam dong', PKR: 'pakistan', BDT: 'bangladesh taka', LKR: 'sri lanka',
+  NPR: 'nepal', BRL: 'brazil real', MXN: 'mexico peso', TRY: 'turkey turkish lira', PLN: 'poland zloty', SEK: 'sweden krona',
+};
+const filterCurrencyOptions = createFilterOptions({
+  stringify: (o) => `${o.code} ${o.name} ${CURRENCY_SEARCH_ALIASES[o.code] || ''}`,
+});
 
 const STATUS_COLOR = {
   FREE_ACCESS: 'default',
@@ -467,15 +485,21 @@ function PricingTab({ canManage }) {
         <Paper variant="outlined" sx={{ p: 2 }}>
           <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Add a currency</Typography>
           <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
-            <TextField
-              select size="small" label="Currency" sx={{ minWidth: 160 }}
-              value={add.currency}
-              onChange={(e) => setAdd((a) => ({ ...a, currency: e.target.value }))}
-            >
-              {addable.map((c) => (
-                <MenuItem key={c.code} value={c.code}>{c.code} — {c.name}</MenuItem>
-              ))}
-            </TextField>
+            <Autocomplete
+              size="small"
+              sx={{ minWidth: 260 }}
+              options={addable}
+              autoHighlight
+              filterOptions={filterCurrencyOptions}
+              getOptionLabel={(o) => `${o.code} — ${o.name}`}
+              isOptionEqualToValue={(o, v) => o.code === v.code}
+              value={addable.find((c) => c.code === add.currency) || null}
+              onChange={(_, o) => setAdd((a) => ({ ...a, currency: o ? o.code : '' }))}
+              noOptionsText="No currency matches — try the ISO code (GBP, EUR…) or country name"
+              renderInput={(params) => (
+                <TextField {...params} label="Currency" placeholder="Search: GBP, uk, euro, dubai…" />
+              )}
+            />
             <TextField
               type="number" size="small" label="Monthly" sx={{ width: 120 }}
               value={add.monthly} onChange={(e) => setAdd((a) => ({ ...a, monthly: e.target.value }))}

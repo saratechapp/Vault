@@ -630,6 +630,60 @@ async function incrementAiUsage(userId) {
   return next;
 }
 
+// Receipt/bill scanner usage — a single per-user row carrying a lifetime
+// total (the Free tier's cap is a LIFETIME 3, see receiptScanPolicy.js) plus
+// a rolling window total for paid tiers. Separate from ai_usage so a scan
+// cap and an AI-request cap never bleed into each other. Degrades to "no
+// counts" if 0027 hasn't been applied yet, same tolerance as
+// getSessionBySessionId for 0022.
+//
+// Returns { lifetimeCount, windowKey, windowCount } — the caller
+// (services/receiptScanQuota.js) decides which one the user's plan cares
+// about and whether windowKey is still current.
+async function getReceiptScanCounters(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('receipt_scan_totals')
+      .select('lifetime_count, window_key, window_count')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw error;
+    return {
+      lifetimeCount: data ? data.lifetime_count : 0,
+      windowKey: data ? data.window_key : null,
+      windowCount: data ? data.window_count : 0,
+    };
+  } catch (err) {
+    if (isMissingTableError(err)) return { lifetimeCount: 0, windowKey: null, windowCount: 0, unavailable: true };
+    throw err;
+  }
+}
+
+// Records ONE completed scan (a whole multi-image scan counts as one). Bumps
+// the lifetime total always; bumps the window total, resetting it first when
+// `windowKey` has rolled over since the last scan. Call this only AFTER the
+// vision call succeeds — a failed/blurry upload must never burn a scan.
+async function bumpReceiptScanCounter(userId, windowKey) {
+  try {
+    const cur = await getReceiptScanCounters(userId);
+    const sameWindow = cur.windowKey === windowKey;
+    const row = {
+      user_id: userId,
+      lifetime_count: cur.lifetimeCount + 1,
+      window_key: windowKey,
+      window_count: (sameWindow ? cur.windowCount : 0) + 1,
+      updated_at: new Date().toISOString(),
+    };
+    if (cur.lifetimeCount === 0) row.first_scan_at = new Date().toISOString();
+    const { error } = await supabase.from('receipt_scan_totals').upsert(row, { onConflict: 'user_id' });
+    if (error) throw error;
+    return { lifetimeCount: row.lifetime_count, windowKey, windowCount: row.window_count };
+  } catch (err) {
+    if (isMissingTableError(err)) return { lifetimeCount: 0, windowKey, windowCount: 0, unavailable: true };
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ask AI conversations/messages — see 0018_ai_conversations.sql. Conversation
 // list has no pagination (matches every other list endpoint in this codebase
@@ -818,6 +872,8 @@ module.exports = {
   insertBillPayment,
   getAiUsageToday,
   incrementAiUsage,
+  getReceiptScanCounters,
+  bumpReceiptScanCounter,
   listConversations,
   getConversation,
   listMessages,

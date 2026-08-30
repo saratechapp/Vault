@@ -23,8 +23,18 @@ const isDevEnv = process.env.NODE_ENV === 'development';
 // connect-src carve-out for the admin SPA's browser-side auth calls.
 const SUPABASE_HOST = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 
+// Anthropic API key for the server-side vision call behind POST
+// /api/records/scan (bill / receipt / payment-screenshot scanner). Used
+// only there; never sent to any client. Unset = the scan endpoint returns
+// 502 and the mobile app falls back to manual entry.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+// Only needed if ANTHROPIC_API_KEY is an identity-linked (workspace-scoped)
+// key — those require the workspace id on every request. Leave unset for a
+// normal API key.
+const ANTHROPIC_WORKSPACE_ID = process.env.ANTHROPIC_WORKSPACE_ID || '';
+
 // `version` is read from package.json (never hardcoded) — mobile's Settings
 // > About screen surfaces it as "API Version" alongside its own app version.
 const { version: API_VERSION } = require('../../package.json');
 
-module.exports = { PORT, CORS_ORIGINS, TRUST_PROXY, isDevEnv, SUPABASE_HOST, API_VERSION };
+module.exports = { PORT, CORS_ORIGINS, TRUST_PROXY, isDevEnv, SUPABASE_HOST, API_VERSION, ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID };

@@ -18,6 +18,10 @@ const { API_VERSION } = require('../config/env');
 const { ah } = require('../lib/asyncHandler');
 const { requireAuth } = require('../middleware/requireAuth');
 const { requireFeature, assertUnderLimit } = require('../middleware/planGuards');
+const { securityLog } = require('../lib/securityLog');
+const { scanUpload } = require('../middleware/scanUpload');
+const { scanReceipts } = require('../services/receiptScanService');
+const receiptScanQuota = require('../services/receiptScanQuota');
 const { sendJSON, bumpCache } = require('../lib/httpCache');
 const { buildSafeUser } = require('../lib/safeUser');
 const { countryFromHeaders } = require('../lib/geoIp');
@@ -1530,6 +1534,89 @@ router.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('c
 
   res.status(201).json(assistantMessage);
 }));
+
+// ---- bill / receipt / payment-screenshot scanner ----
+// The mobile "Scan a bill or payment" flow posts 1–8 images here; a
+// vision-capable model reads out ONE transaction (see
+// SCAN_ENDPOINT_CONTRACT.md and services/receiptScanService.js). The API key
+// stays server-side. scanUpload parses the multipart body into memory only —
+// images are never written to disk, never logged, and dropped as soon as the
+// response is sent.
+//
+// Metering (services/receiptScanPolicy.js — the single source of truth, the
+// app hardcodes nothing): Free users get 3 AI scans for their entire
+// lifetime, tracked per Supabase user id so reinstalling / clearing storage
+// / logging out and back in / switching devices can't reset it. Paid
+// subscribers get a backend-configured monthly (or yearly) allowance. A
+// whole multi-image scan counts as ONE, and only a SUCCESSFUL scan is
+// counted — a blurry photo that returns nothing never burns a scan. Manual
+// entry and plain manual upload are never metered.
+
+// Lightweight quota probe — the app calls this on the Scan screen to show
+// "N scans left" and to render the upgrade panel before the user wastes
+// effort. No image work, just the counter + subscription status.
+router.get(
+  '/api/records/scan/quota',
+  requireAuth,
+  ah(async (req, res) => {
+    const profile = await db.getProfile(req.userId);
+    const subscription = await db.resolveForUser(req.userId, profile);
+    const quota = await receiptScanQuota.resolve(req.userId, subscription);
+    res.json({ quota });
+  })
+);
+
+router.post(
+  '/api/records/scan',
+  requireAuth,
+  requireFeature('canUseAIInsights'),
+  scanUpload,
+  ah(async (req, res) => {
+    const files = req.files || [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'no_images' });
+    }
+
+    const profile = await db.getProfile(req.userId);
+    const subscription = await db.resolveForUser(req.userId, profile);
+    const quota = await receiptScanQuota.resolve(req.userId, subscription);
+
+    // Lifetime/window cap reached — 403 with the full resolved quota so the
+    // app renders "You've used all N free scans" + the upgrade actions from
+    // data, never a hardcoded number.
+    if (!quota.unlimited && quota.remaining <= 0) {
+      return res.status(403).json({ error: 'upgrade_required', reason: 'scan_limit_reached', quota });
+    }
+
+    let hints = {};
+    try {
+      const parsed = JSON.parse(req.body.hints || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) hints = parsed;
+    } catch {
+      hints = {};
+    }
+
+    let result;
+    try {
+      result = await scanReceipts({ files, hints, categories: computeCategories(req.userData) });
+    } catch (err) {
+      if (err.code === 'NO_TRANSACTION' || err.code === 'NO_READABLE_IMAGES') {
+        // Not counted — the user got nothing usable back.
+        return res.status(422).json({ error: 'no_transaction_found', warnings: err.warnings || [] });
+      }
+      // NO_API_KEY / UPSTREAM_ERROR / BAD_MODEL_OUTPUT / MODEL_REFUSED — log
+      // only the reason code, never the images or any extracted value. Also
+      // not counted.
+      securityLog('receipt_scan_failed', { userId: req.userId, reason: err.code || 'unknown' });
+      return res.status(502).json({ error: 'scan_failed' });
+    }
+
+    // Success — now (and only now) burn one scan, and hand back the fresh
+    // quota so the app can update "N scans left" without a second call.
+    const nextQuota = await receiptScanQuota.record(req.userId, quota);
+    return res.json({ ...result, quota: nextQuota });
+  })
+);
 
 // ---- data export (manual "backup a copy" snapshot, e.g. for the mobile
 // app's Google Drive backup — not a restore/import path, read-only) ----

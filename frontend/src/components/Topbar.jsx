@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Bell, Plus, ShieldCheck } from 'lucide-react';
+import { Bell, Plus, ShieldCheck, ChevronDown } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useNewTransaction, useTxCreatedListener } from '../context/NewTransactionContext.jsx';
@@ -123,13 +123,14 @@ export function Topbar() {
           onClick={() => setProfileOpen(true)}
           aria-label="Open profile"
           aria-haspopup="dialog"
-          className="flex items-center gap-2 rounded-xl border border-line bg-tint/[0.05] py-1.5 pl-1.5 pr-3 transition hover:bg-tint/[0.08]"
+          className="flex items-center gap-2 rounded-xl border border-line bg-tint/[0.05] py-1.5 pl-1.5 pr-2.5 transition hover:bg-tint/[0.08]"
         >
           <Avatar src={user?.avatar} name={user?.name} className="h-7 w-7 rounded-lg text-[10px]" />
           <div className="leading-tight text-left">
             <p className="text-xs font-semibold text-fg">{user?.name}</p>
             <p className="truncate text-[10px] text-muted">{user?.email}</p>
           </div>
+          <ChevronDown size={16} className="shrink-0 text-muted" />
         </button>
       </div>
       <ProfileDrawer open={profileOpen} onClose={() => setProfileOpen(false)} />
