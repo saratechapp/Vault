@@ -4,7 +4,11 @@
 // touch disk (see SCAN_ENDPOINT_CONTRACT.md § Privacy).
 const multer = require('multer');
 
-const MAX_FILES = 8;
+// A large bill can be split across up to MAX_FILES pages/photos; the whole
+// batch is analysed as ONE transaction and metered as ONE AI scan. The
+// mobile client enforces the same ceiling (scan/prepareImage.ts MAX_IMAGES);
+// this is the server-side backstop.
+const MAX_FILES = 4;
 const MAX_BYTES = 8 * 1024 * 1024; // ~8 MB per part (contract)
 
 const upload = multer({

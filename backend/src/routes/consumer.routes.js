@@ -1536,9 +1536,10 @@ router.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('c
 }));
 
 // ---- bill / receipt / payment-screenshot scanner ----
-// The mobile "Scan a bill or payment" flow posts 1–8 images here; a
-// vision-capable model reads out ONE transaction (see
-// SCAN_ENDPOINT_CONTRACT.md and services/receiptScanService.js). The API key
+// The mobile "Scan a bill or payment" flow posts 1–4 images here (a large
+// bill split across pages/photos); a vision-capable model reads them
+// TOGETHER as ONE transaction (see SCAN_ENDPOINT_CONTRACT.md and
+// services/receiptScanService.js). The API key
 // stays server-side. scanUpload parses the multipart body into memory only —
 // images are never written to disk, never logged, and dropped as soon as the
 // response is sent.

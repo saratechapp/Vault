@@ -114,7 +114,14 @@ function buildSystemPrompt() {
     '- `currency` as an ISO 4217 code (INR, USD, ...). `date` as YYYY-MM-DD. `time` as 24-hour HH:mm. `paymentMethod` as a short label ("UPI", "Credit Card", "Cash", "Bank Transfer", ...).',
     '- `categoryName` / `subcategoryName`: choose from the caller\'s category list ONLY (exact names). If nothing fits, use null. NEVER invent a category.',
     '- `referenceId`: the UPI / transaction / reference id. `invoiceNumber`: a bill or invoice number.',
-    '- `subtotal` / `tax` / `discount`: numbers when the image breaks them out, else null.',
+    '- `subtotal` / `tax` / `discount`: numbers when the image breaks them out, else null. Group GST / VAT / service charge / cess together into `tax`.',
+    '',
+    'LINE ITEMS — do this thoroughly for a large or itemised bill:',
+    'Return EVERY purchased line you can read in `lineItems`, in the order they appear, not just the first few. For each: `name` (the printed description), `qty` (units bought, or null if the line shows none), `amount` (the money for THAT line — the line total if printed, otherwise the unit price).',
+    'If the bill is long and some rows are creased, cut off, or unreadable, return the rows you CAN read and add ONE `warnings` entry saying roughly how many were skipped. Do NOT invent items, names, quantities, or prices to fill gaps. The line items may be incomplete — but `amount` (the grand total) must still be the real amount paid, read from the bill\'s total line, never re-summed from partial items.',
+    '',
+    '`note` — a short readable spending summary (1 to 3 lines, <= 300 chars):',
+    'Plain language describing WHAT was bought and the money breakdown, so the transaction is not just "Supermarket purchase". e.g. "Groceries: milk, bread, rice, vegetables, fruits, cleaning supplies, snacks. Subtotal 2000, discount 100, tax 342, paid 2242." Summarise a long list ("~20 grocery items") rather than repeating every row. If the bill is trivially small (one or two items) `note` may be null.',
     '',
     'Confidence & honesty: every field carries `confidence` of "high" or "low". If a value cannot be read, return `value: null`, `confidence: "low"`, and add a short `warnings` entry. DO NOT GUESS.',
     '',
@@ -247,6 +254,11 @@ function normalizeResult(parsed, { imageCount } = {}) {
   }
   if (transaction.type.value && !['expense', 'income'].includes(transaction.type.value)) {
     transaction.type = { value: null, confidence: 'low' };
+  }
+  // `note` is a short spending summary (prompt caps it at ~300 chars) — clamp
+  // defensively so a runaway response can't bloat the saved transaction note.
+  if (transaction.note.value && transaction.note.value.length > 600) {
+    transaction.note = { value: `${transaction.note.value.slice(0, 597)}…`, confidence: transaction.note.confidence };
   }
 
   const lineItems = Array.isArray(src.lineItems)
