@@ -144,9 +144,26 @@ async function deleteAdmin(id) {
 // scopes per-user) — reuses db.js's getProfile/updateProfile directly since
 // it's the same table and field convention, not a parallel one.
 // ---------------------------------------------------------------------------
+// PostgREST's `.or()` takes a raw filter expression. Interpolating an
+// unescaped search string into it lets `,` `(` `)` `"` break out of the
+// intended name/phone/email match and inject arbitrary PostgREST filters
+// (a low-privilege admin widening what they can see, or forcing errors).
+// Strip every character that isn't plausibly part of a person's name,
+// phone or email, collapse whitespace, and cap the length. `*` / `%` are
+// dropped too so a caller can't turn the search into a full-table LIKE
+// wildcard scan.
+function sanitizeOrSearchTerm(raw) {
+  return String(raw || '')
+    .replace(/[,()"'\\*%:<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
 async function listUsers({ page = 1, pageSize = 25, search = '', status = '', plan = '' } = {}) {
   let query = supabase.from('profiles').select('*', { count: 'exact' });
-  if (search) query = query.or(`name.ilike.%${search}%,phone.ilike.%${search}%,email.ilike.%${search}%`);
+  const safeSearch = sanitizeOrSearchTerm(search);
+  if (safeSearch) query = query.or(`name.ilike.%${safeSearch}%,phone.ilike.%${safeSearch}%,email.ilike.%${safeSearch}%`);
   if (status) query = query.eq('status', status);
   if (plan) query = query.eq('plan', plan);
   const from = (page - 1) * pageSize;

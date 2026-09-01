@@ -38,10 +38,34 @@ router.post('/', requirePermission('admins', 'create'), ah(async (req, res) => {
   res.status(201).json({ ...created, roleName: role.name });
 }));
 
+const ADMIN_STATUSES = ['active', 'suspended'];
+
 router.patch('/:id', requirePermission('admins', 'edit'), ah(async (req, res) => {
   const before = await adminDb.getAdmin(req.params.id);
   if (!before) return res.status(404).json({ error: 'not_found' });
   const { name, department, phone, avatar, roleId, status } = req.body || {};
+
+  // Privilege-escalation / lockout guards on the two authorization-bearing
+  // fields:
+  //  - Nobody edits their OWN role or status (mirrors delete's
+  //    cannot_delete_self — stops both self-promotion and self-lockout).
+  //  - roleId must reference a real role, and assigning the is_system
+  //    "Super Admin" role is reserved for an existing Super Admin, so a
+  //    custom role holding `admins:edit` can't mint one (itself included).
+  if ((roleId !== undefined || status !== undefined) && req.params.id === req.admin.id) {
+    return res.status(400).json({ error: 'cannot_change_own_role_or_status' });
+  }
+  if (status !== undefined && !ADMIN_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'invalid_status' });
+  }
+  if (roleId !== undefined) {
+    const role = await adminDb.getRole(roleId);
+    if (!role) return res.status(400).json({ error: 'invalid_role' });
+    if (role.isSystem && !req.admin.isSuperAdmin) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+  }
+
   const patch = {};
   if (name !== undefined) patch.name = name;
   if (department !== undefined) patch.department = department;

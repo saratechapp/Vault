@@ -59,16 +59,22 @@ async function requireAuth(req, res, next) {
     const sessionId = req.headers['x-session-id'] || null;
     req.sessionId = sessionId;
     req.currentSession = null;
+    // True only when the `sessions` table itself is absent (0022 not applied
+    // yet) — the one case where per-device revocation and the 2FA step-up
+    // gate below genuinely cannot be enforced and must degrade rather than
+    // hard-block every request. A merely-missing/unknown x-session-id header
+    // does NOT set this.
+    let sessionInfraUnavailable = false;
     if (sessionId) {
       try {
         req.currentSession = await db.getSessionBySessionId(req.userId, sessionId);
       } catch (err) {
-        // Degrades to "session tracking unavailable" (same as sending no
-        // header at all) rather than 500ing every request in this app —
-        // e.g. 0022_sessions.sql not yet manually applied (see that
+        // Degrades to "session tracking unavailable" rather than 500ing every
+        // request — e.g. 0022_sessions.sql not yet manually applied (see that
         // migration's own comment on why this can't be applied automatically
         // in this environment).
         if (!db.isMissingTableError(err)) throw err;
+        sessionInfraUnavailable = true;
       }
       if (req.currentSession?.revokedAt) {
         securityLog('device_session_revoked_token_rejected', { userId: req.userId, path: req.path });
@@ -85,13 +91,28 @@ async function requireAuth(req, res, next) {
     // twoFactorEnabled right after login, before a session row may even
     // exist yet), /api/login-events (registers the session row this gate
     // depends on), and /api/health.
+    //
+    // A `two_factor_enabled` account is, by construction, one that completed
+    // the mobile 2FA-enable flow (POST /api/2fa/verify — the only code path
+    // that sets the column; the web panel's toggle is a UI stub and is not
+    // in PATCH /api/me's whitelist), and the mobile client always sends
+    // x-session-id. So the gate now blocks whenever there is no *verified*
+    // current session — including when x-session-id is absent or unknown.
+    // Previously, simply omitting the header skipped the check entirely,
+    // letting a replayed first-factor-only JWT (e.g. from a stolen refresh
+    // token) reach every protected route with 2FA effectively disabled.
     const TWO_FACTOR_EXEMPT_PREFIXES = ['/api/2fa/', '/api/me', '/api/login-events', '/api/health'];
     if (
       req.userData.twoFactorEnabled &&
-      req.currentSession &&
-      !req.currentSession.twoFactorVerifiedAt &&
-      !TWO_FACTOR_EXEMPT_PREFIXES.some((p) => req.path.startsWith(p))
+      !sessionInfraUnavailable &&
+      !TWO_FACTOR_EXEMPT_PREFIXES.some((p) => req.path.startsWith(p)) &&
+      (!req.currentSession || !req.currentSession.twoFactorVerifiedAt)
     ) {
+      if (!req.currentSession) {
+        securityLog('two_factor_required_no_session', {
+          userId: req.userId, path: req.path, hadSessionId: !!sessionId,
+        });
+      }
       return res.status(403).json({ error: 'two_factor_required' });
     }
 

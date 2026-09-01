@@ -202,6 +202,14 @@ function isMissingColumnError(error) {
 function isMissingTableError(error) {
   return error?.code === '42P01' || error?.code === 'PGRST205';
 }
+// A Postgres function that hasn't been created yet — raw `42883`
+// (undefined_function) or PostgREST's `PGRST202` schema-cache miss. Lets
+// bumpReceiptScanCounter prefer the atomic increment_receipt_scan() RPC
+// (0028) when it exists and fall back to the read-modify-write upsert when
+// it doesn't, so the scanner keeps working before that migration is applied.
+function isMissingFunctionError(error) {
+  return error?.code === '42883' || error?.code === 'PGRST202';
+}
 // Strips whichever of `row`'s own keys the error message actually names, so
 // a genuinely-unrelated column error on a field this row didn't even touch
 // never gets silently swallowed — only ever narrows the payload, never
@@ -664,6 +672,34 @@ async function getReceiptScanCounters(userId) {
 // `windowKey` has rolled over since the last scan. Call this only AFTER the
 // vision call succeeds — a failed/blurry upload must never burn a scan.
 async function bumpReceiptScanCounter(userId, windowKey) {
+  // Preferred path: a single atomic statement in Postgres (0028_receipt_scan
+  // _increment_fn.sql) — INSERT ... ON CONFLICT DO UPDATE ... RETURNING, so
+  // two concurrent scans from the same user can never lose an increment the
+  // way a read-then-upsert can. The route's in-process per-user queue covers
+  // the single-instance case; this covers horizontal scaling too.
+  try {
+    const { data, error } = await supabase.rpc('increment_receipt_scan', {
+      p_user_id: userId,
+      p_window_key: windowKey,
+    });
+    if (error) throw error;
+    const row = Array.isArray(data) ? data[0] : data;
+    if (row) {
+      return {
+        lifetimeCount: row.lifetime_count,
+        windowKey: row.window_key,
+        windowCount: row.window_count,
+      };
+    }
+  } catch (err) {
+    if (isMissingTableError(err)) return { lifetimeCount: 0, windowKey, windowCount: 0, unavailable: true };
+    if (!isMissingFunctionError(err)) throw err;
+    // RPC not deployed yet — fall through to the non-atomic upsert below.
+  }
+
+  // Fallback (pre-0028): read-modify-write upsert. Byte-identical to the
+  // original implementation; safe because the route serializes a single
+  // user's scans in-process.
   try {
     const cur = await getReceiptScanCounters(userId);
     const sameWindow = cur.windowKey === windowKey;

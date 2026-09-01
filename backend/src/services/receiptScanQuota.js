@@ -70,6 +70,11 @@ function computeQuota(subscription, counters, now = new Date()) {
     remaining: unlimited ? null : Math.max(0, limit - used),
     unlimited,
     enforced,
+    // True only when the counter store couldn't be read (table missing /
+    // unreachable). The pure math above still degrades to "no cap" for
+    // dev/test; resolve() decides whether that degradation is acceptable
+    // for the current environment.
+    unavailable: !!(counters && counters.unavailable),
     monthlyLimit: POLICY.MONTHLY.limit,
     yearlyLimit: POLICY.YEARLY.limit,
   };
@@ -77,7 +82,18 @@ function computeQuota(subscription, counters, now = new Date()) {
 
 async function resolve(userId, subscription) {
   const counters = await db.getReceiptScanCounters(userId);
-  return computeQuota(subscription, counters);
+  const quota = computeQuota(subscription, counters);
+  // Fail closed in production: an un-countable scan is an unmetered scan,
+  // which silently defeats the lifetime / window cap the spec requires be
+  // un-bypassable. If the counter store is unreachable (0027 not applied,
+  // Postgres down), a production request gets a 503 from the route rather
+  // than free unlimited scans. Dev/test keep the original "degrade to no
+  // cap" behaviour so a local env without 0027 still works — and the pure
+  // computeQuota() unit tests are unaffected.
+  if (quota.unavailable && process.env.NODE_ENV === 'production') {
+    return { ...quota, unlimited: false, enforced: true, remaining: 0, used: quota.limit ?? 0 };
+  }
+  return quota;
 }
 
 // Call AFTER a scan has actually produced a result. `resolvedQuota` is what

@@ -9,13 +9,15 @@
 const express = require('express');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const { supabase } = require('../supabaseClient');
 const db = require('../db');
 const adminDb = require('../adminDb');
 const { parseDevice } = require('../lib/deviceParser');
 const plans = require('../plans');
-const { API_VERSION } = require('../config/env');
+const { API_VERSION, isDevEnv } = require('../config/env');
 const { ah } = require('../lib/asyncHandler');
+const { runExclusive } = require('../lib/userMutex');
 const { requireAuth } = require('../middleware/requireAuth');
 const { requireFeature, assertUnderLimit } = require('../middleware/planGuards');
 const { securityLog } = require('../lib/securityLog');
@@ -525,7 +527,14 @@ function generateTwoFactorCode() {
 // the code is logged server-side so the rest of the flow (storage, hashing,
 // expiry, rate-limiting, verification) is fully buildable/testable.
 async function sendTwoFactorEmail(email, code) {
-  console.log(`[2fa] verification code for ${email}: ${code}`);
+  // No transactional-email provider is wired yet (see TODO above). Until one
+  // is, the plaintext code is echoed to the server log ONLY outside
+  // production so the rest of the flow stays testable — a live OTP must
+  // never be written to a production log sink. Ship a real email send (and
+  // drop this branch) before 2FA is offered to real users in production.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[2fa] verification code for ${email}: ${code}`);
+  }
 }
 const twoFactorLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
 
@@ -1567,10 +1576,31 @@ router.get(
   })
 );
 
+// Per-user cost/abuse backstop for the vision call, independent of the
+// scan-quota accounting below: an unsuccessful scan (blurry photo -> 422,
+// deliberately not metered) still spends a real upstream API call, so a
+// caller uploading junk in a loop could run up cost while staying inside the
+// blanket 300/15min /api limiter. Keyed on the authenticated user id (so it
+// can't be shed by rotating IPs) and generous enough that no genuine
+// receipt-scanning session ever hits it. Same explicit dev opt-out as the
+// other limiters.
+const scanLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // requireAuth runs before this limiter, so req.userId is always set here;
+  // the IP fallback is only a defensive default (ipKeyGenerator normalises
+  // IPv6 so a /64 can't be used to multiply the allowance).
+  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
+  skip: () => isDevEnv,
+});
+
 router.post(
   '/api/records/scan',
   requireAuth,
   requireFeature('canUseAIInsights'),
+  scanLimiter,
   scanUpload,
   ah(async (req, res) => {
     const files = req.files || [];
@@ -1578,44 +1608,64 @@ router.post(
       return res.status(400).json({ error: 'no_images' });
     }
 
-    const profile = await db.getProfile(req.userId);
-    const subscription = await db.resolveForUser(req.userId, profile);
-    const quota = await receiptScanQuota.resolve(req.userId, subscription);
+    // Serialize a single user's concurrent scans. resolve() (read the
+    // remaining allowance) and record() (consume one) straddle the multi-
+    // second vision call; without this, two parallel requests from the same
+    // account both pass the `remaining <= 0` check before either records,
+    // letting a Free user exceed the 3-scan lifetime cap by firing N scans
+    // at once. The queue is per-user, so it never serializes across
+    // accounts. Returns a {status, body} envelope rather than writing the
+    // response inside the critical section.
+    const outcome = await runExclusive(`scan:${req.userId}`, async () => {
+      const profile = await db.getProfile(req.userId);
+      const subscription = await db.resolveForUser(req.userId, profile);
+      const quota = await receiptScanQuota.resolve(req.userId, subscription);
 
-    // Lifetime/window cap reached — 403 with the full resolved quota so the
-    // app renders "You've used all N free scans" + the upgrade actions from
-    // data, never a hardcoded number.
-    if (!quota.unlimited && quota.remaining <= 0) {
-      return res.status(403).json({ error: 'upgrade_required', reason: 'scan_limit_reached', quota });
-    }
-
-    let hints = {};
-    try {
-      const parsed = JSON.parse(req.body.hints || '{}');
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) hints = parsed;
-    } catch {
-      hints = {};
-    }
-
-    let result;
-    try {
-      result = await scanReceipts({ files, hints, categories: computeCategories(req.userData) });
-    } catch (err) {
-      if (err.code === 'NO_TRANSACTION' || err.code === 'NO_READABLE_IMAGES') {
-        // Not counted — the user got nothing usable back.
-        return res.status(422).json({ error: 'no_transaction_found', warnings: err.warnings || [] });
+      // Counter store unreachable in production (0027 not applied / DB down)
+      // — receiptScanQuota.resolve has already forced this to a blocked
+      // quota (fail closed). Surface it as a distinct 503 so the app shows
+      // "try again later", not "you're out of free scans".
+      if (quota.unavailable && !quota.unlimited) {
+        return { status: 503, body: { error: 'scan_temporarily_unavailable' } };
       }
-      // NO_API_KEY / UPSTREAM_ERROR / BAD_MODEL_OUTPUT / MODEL_REFUSED — log
-      // only the reason code, never the images or any extracted value. Also
-      // not counted.
-      securityLog('receipt_scan_failed', { userId: req.userId, reason: err.code || 'unknown' });
-      return res.status(502).json({ error: 'scan_failed' });
-    }
 
-    // Success — now (and only now) burn one scan, and hand back the fresh
-    // quota so the app can update "N scans left" without a second call.
-    const nextQuota = await receiptScanQuota.record(req.userId, quota);
-    return res.json({ ...result, quota: nextQuota });
+      // Lifetime/window cap reached — 403 with the full resolved quota so the
+      // app renders "You've used all N free scans" + the upgrade actions from
+      // data, never a hardcoded number.
+      if (!quota.unlimited && quota.remaining <= 0) {
+        return { status: 403, body: { error: 'upgrade_required', reason: 'scan_limit_reached', quota } };
+      }
+
+      let hints = {};
+      try {
+        const parsed = JSON.parse(req.body.hints || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) hints = parsed;
+      } catch {
+        hints = {};
+      }
+
+      let result;
+      try {
+        result = await scanReceipts({ files, hints, categories: computeCategories(req.userData) });
+      } catch (err) {
+        if (err.code === 'NO_TRANSACTION' || err.code === 'NO_READABLE_IMAGES') {
+          // Not counted — the user got nothing usable back.
+          return { status: 422, body: { error: 'no_transaction_found', warnings: err.warnings || [] } };
+        }
+        // NO_API_KEY / UPSTREAM_ERROR / BAD_MODEL_OUTPUT / MODEL_REFUSED — log
+        // only the reason code, never the images or any extracted value. Also
+        // not counted.
+        securityLog('receipt_scan_failed', { userId: req.userId, reason: err.code || 'unknown' });
+        return { status: 502, body: { error: 'scan_failed' } };
+      }
+
+      // Success — now (and only now) burn one scan, and hand back the fresh
+      // quota so the app can update "N scans left" without a second call.
+      const nextQuota = await receiptScanQuota.record(req.userId, quota);
+      return { status: 200, body: { ...result, quota: nextQuota } };
+    });
+
+    return res.status(outcome.status).json(outcome.body);
   })
 );
 
@@ -1658,6 +1708,20 @@ router.post('/api/import', requireAuth, ah(async (req, res) => {
   const existingCount = await db.countUserData(req.userId);
   if (existingCount > 0) {
     return res.status(409).json({ error: 'account_not_empty', message: 'Reset Data before restoring a backup.' });
+  }
+
+  // Abuse ceiling. A restore is the counterpart of this app's own export, so
+  // these limits sit far above any real account (the 5 MB JSON body cap is
+  // the primary bound); they only stop a hand-crafted payload from driving
+  // the per-row sequential-insert loop below for minutes on end.
+  const IMPORT_ROW_CAPS = {
+    transactions: 100000, categories: 5000, accounts: 2000, budgets: 5000,
+    bills: 10000, goals: 5000, debts: 5000, templates: 5000, billPayments: 100000,
+  };
+  for (const [key, cap] of Object.entries(IMPORT_ROW_CAPS)) {
+    if (Array.isArray(payload[key]) && payload[key].length > cap) {
+      return res.status(413).json({ error: 'import_too_large', field: key, max: cap });
+    }
   }
 
   const categoryIdMap = new Map();

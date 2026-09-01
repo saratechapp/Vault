@@ -23,6 +23,14 @@ const consumerRoutes = require('./routes');
 function createApp() {
   const app = express();
 
+  // Fail safe, not open: an unset CORS_ORIGIN in production means
+  // `cors()` below would reflect ANY origin. That's a misconfiguration, not
+  // a valid deployment — refuse to boot rather than silently run wide open.
+  // Local dev / tests (NODE_ENV !== 'production') keep the permissive default.
+  if (process.env.NODE_ENV === 'production' && CORS_ORIGINS.length === 0) {
+    throw new Error('CORS_ORIGIN must be set in production (comma-separated allowed origins). Refusing to start with an open CORS policy.');
+  }
+
   if (TRUST_PROXY) app.set('trust proxy', 1);
 
   // Default Helmet, with carve-outs for the Admin panel (the Vite/MUI SPA

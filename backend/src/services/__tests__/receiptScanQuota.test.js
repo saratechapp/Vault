@@ -82,11 +82,19 @@ test('paid user counts only the CURRENT month window; a stale window reads as 0'
   assert.equal(current.remaining, POLICY.MONTHLY.limit - 40);
 });
 
-test('table not applied yet -> unlimited, never blocks', () => {
+test('table not applied yet -> unlimited, never blocks (pure computeQuota / dev+test)', () => {
   const q = computeQuota({ status: 'FREE_ACCESS' }, { lifetimeCount: 0, windowKey: null, windowCount: 0, unavailable: true });
   assert.equal(q.unlimited, true);
   assert.equal(q.remaining, null);
   assert.equal(q.enforced, false);
+  // Surfaced so resolve() can fail the request closed in production instead
+  // of handing out free unlimited scans when the counter store is missing.
+  assert.equal(q.unavailable, true);
+});
+
+test('counter store reachable -> unavailable is false', () => {
+  const q = computeQuota({ status: 'FREE_ACCESS' }, { lifetimeCount: 1, windowKey: null, windowCount: 0 });
+  assert.equal(q.unavailable, false);
 });
 
 test('quota exposes advertised monthly/yearly limits for the upgrade screen', () => {
