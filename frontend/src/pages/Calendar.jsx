@@ -459,7 +459,7 @@ export default function CalendarPage() {
                   return (
                     <button
                       key={key} type="button" onClick={() => selectDate(date)}
-                      className={`group relative flex aspect-square flex-col items-center rounded-2xl border p-1.5 text-left transition sm:p-2 ${
+                      className={`group relative flex min-h-[58px] flex-col items-center justify-center gap-0.5 rounded-2xl border p-1.5 text-left transition sm:min-h-[88px] sm:p-2 ${
                         isSelected
                           ? 'border-brand-500 bg-brand-500/10 shadow-glow'
                           : isToday
@@ -468,7 +468,7 @@ export default function CalendarPage() {
                       } ${inMonth ? '' : 'opacity-40'}`}
                     >
                       {list.length > 1 && (
-                        <span className="absolute right-1 top-1 rounded-full bg-tint/10 px-1 text-[9px] font-bold text-subtle">{list.length}</span>
+                        <span className="absolute right-1 top-1 rounded-full bg-tint/10 px-1 text-[9px] font-bold leading-tight text-subtle">{list.length}</span>
                       )}
                       {dueBills.length > 0 && (
                         <CalendarClock size={11} className="absolute left-1 top-1 text-amber-500" />
@@ -478,13 +478,17 @@ export default function CalendarPage() {
                       </span>
                       {list.length > 0 && (
                         <>
-                          <span className="mt-1 flex items-center gap-0.5">
-                            {types.has('income') && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />}
-                            {types.has('expense') && <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />}
-                            {types.has('transfer') && <span className="h-1.5 w-1.5 rounded-full bg-cyan-500" />}
-                          </span>
-                          <span className={`mt-auto hidden font-display text-[10px] font-bold tabular-nums sm:block ${summary.net >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                          {/* Payment amount — the key thing to scan for. Kept
+                              tight to the day number (no bottom-pinned gap) and
+                              shown on every breakpoint, weighted/coloured via
+                              the app's emerald(+)/rose(−) tokens. */}
+                          <span className={`font-display text-xs font-bold leading-none tabular-nums sm:text-[13px] ${summary.net >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
                             {formatCurrency(summary.net)}
+                          </span>
+                          <span className="flex items-center gap-0.5">
+                            {types.has('income') && <span className="h-1 w-1 rounded-full bg-emerald-500 sm:h-1.5 sm:w-1.5" />}
+                            {types.has('expense') && <span className="h-1 w-1 rounded-full bg-rose-500 sm:h-1.5 sm:w-1.5" />}
+                            {types.has('transfer') && <span className="h-1 w-1 rounded-full bg-cyan-500 sm:h-1.5 sm:w-1.5" />}
                           </span>
                         </>
                       )}
