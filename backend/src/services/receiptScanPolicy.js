@@ -23,17 +23,21 @@ const ENFORCED = true;
 // another device (the counter is keyed on the Supabase auth user id).
 const FREE = { scope: 'lifetime', limit: 3 };
 
-// Active paid subscriber. There is no stored billing-interval column yet, so
-// "Monthly plan" and "Yearly plan" are two prices for the same ACTIVE tier —
-// both currently resolve to MONTHLY here. `YEARLY` is kept ready so that
-// once a `billing_interval` lands on the profile, switching an annual
-// subscriber to the yearly window is a one-line change in receiptScanQuota
-// (policyFor) with no other edits.
-const MONTHLY = { scope: 'month', limit: 300 };
-const YEARLY = { scope: 'year', limit: 3000 };
+// Active paid subscriber. 15 scan SESSIONS per BILLING PERIOD (a session may
+// bundle up to 4 images and still counts as one). The window is the user's
+// actual subscription period — it resets on the renewal anniversary
+// (current_period_start advancing), NOT on the 1st of the calendar month.
+// The monthly and yearly plans get the same 15; the yearly plan's period is
+// simply a year. See receiptScanQuota.windowKeyFor for the 'billing_period'
+// window derivation. `MONTHLY`/`YEARLY` names kept so policyFor's mapping is a
+// one-liner.
+const MONTHLY = { scope: 'billing_period', limit: 15 };
+const YEARLY = { scope: 'billing_period', limit: 15 };
 
-// Free trial — the paid experience preview. Gets a real (if smaller) monthly
-// allowance rather than the 3-scan lifetime cap.
-const TRIAL = { scope: 'month', limit: 50 };
+// Free trial — the paid experience preview, so the SAME 15 per billing period.
+// A trial started via the provider has a real period; the pre-checkout
+// auto-trial (0025, no provider subscription yet) falls back to a calendar
+// month window (windowKeyFor), which is the closest thing to a "period" it has.
+const TRIAL = { scope: 'billing_period', limit: 15 };
 
 module.exports = { ENFORCED, FREE, MONTHLY, YEARLY, TRIAL };

@@ -37,4 +37,33 @@ const ANTHROPIC_WORKSPACE_ID = process.env.ANTHROPIC_WORKSPACE_ID || '';
 // > About screen surfaces it as "API Version" alongside its own app version.
 const { version: API_VERSION } = require('../../package.json');
 
-module.exports = { PORT, CORS_ORIGINS, TRUST_PROXY, isDevEnv, SUPABASE_HOST, API_VERSION, ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID };
+// ---------------------------------------------------------------------------
+// Recurring billing (0029_subscription_billing.sql). Every one of these is
+// OPTIONAL: with a provider's keys unset, that provider is simply "not
+// configured" — checkout for it returns 503 and its webhook returns 503, and
+// the rest of the app (including the admin-gated trial/enforcement flags)
+// behaves exactly as it did before any billing existed. Never sent to a
+// client bundle; read only by backend/src/services/billing/*.
+// ---------------------------------------------------------------------------
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+
+// country(2-letter) -> provider, plus a `*` wildcard. Default: India on
+// Razorpay, everyone else on Stripe. Format: "IN:razorpay,*:stripe".
+const SUBSCRIPTION_PROVIDER_MAP = process.env.SUBSCRIPTION_PROVIDER_MAP || 'IN:razorpay,*:stripe';
+
+// Absolute origin the provider-hosted checkout redirects back to
+// (…/app/subscription?status=success|cancelled). Falls back to the first
+// CORS origin, then localhost for dev.
+const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || CORS_ORIGINS[0] || 'http://localhost:5173').replace(/\/$/, '');
+
+module.exports = {
+  PORT, CORS_ORIGINS, TRUST_PROXY, isDevEnv, SUPABASE_HOST, API_VERSION,
+  ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID,
+  STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+  RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET,
+  SUBSCRIPTION_PROVIDER_MAP, APP_PUBLIC_URL,
+};

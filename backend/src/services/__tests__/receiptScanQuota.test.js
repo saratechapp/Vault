@@ -23,17 +23,19 @@ test('policyFor: no / lapsed subscription -> Free lifetime 3', () => {
   }
 });
 
-test('policyFor: ACTIVE subscriber -> paid monthly window', () => {
+test('policyFor: ACTIVE subscriber -> 15 per billing period', () => {
   const p = policyFor({ status: 'ACTIVE' });
   assert.equal(p.plan, 'active');
-  assert.equal(p.scope, 'month');
+  assert.equal(p.scope, 'billing_period');
+  assert.equal(p.limit, 15);
   assert.equal(p.limit, POLICY.MONTHLY.limit);
 });
 
-test('policyFor: FREE_TRIAL -> trial monthly window', () => {
+test('policyFor: FREE_TRIAL -> the same 15 per billing period', () => {
   const p = policyFor({ status: 'FREE_TRIAL' });
   assert.equal(p.plan, 'trial');
-  assert.equal(p.scope, 'month');
+  assert.equal(p.scope, 'billing_period');
+  assert.equal(p.limit, 15);
 });
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,22 @@ test('windowKeyFor: lifetime / month / year keys (UTC)', () => {
   assert.equal(windowKeyFor('lifetime', at), 'lifetime');
   assert.equal(windowKeyFor('month', at), '2026-08');
   assert.equal(windowKeyFor('year', at), '2026');
+});
+
+test('windowKeyFor: billing_period keys on the provider period start, else the calendar month', () => {
+  const at = new Date('2026-08-30T12:00:00Z');
+  // provider subscription with a real period -> key tracks current_period_start
+  const start = '2026-09-02T00:00:00.000Z';
+  assert.equal(windowKeyFor('billing_period', at, { currentPeriodStart: start }), `bp:${Date.parse(start)}`);
+  // a renewal advances current_period_start -> a different key -> count resets
+  const next = '2026-10-02T00:00:00.000Z';
+  assert.notEqual(
+    windowKeyFor('billing_period', at, { currentPeriodStart: start }),
+    windowKeyFor('billing_period', at, { currentPeriodStart: next })
+  );
+  // pre-checkout auto-trial (no provider period) -> calendar month fallback
+  assert.equal(windowKeyFor('billing_period', at, null), '2026-08');
+  assert.equal(windowKeyFor('billing_period', at, { currentPeriodStart: null }), '2026-08');
 });
 
 // ---------------------------------------------------------------------------
@@ -71,15 +89,33 @@ test('Free user somehow over the cap never goes negative', () => {
   assert.equal(q.remaining, 0);
 });
 
-test('paid user counts only the CURRENT month window; a stale window reads as 0', () => {
-  const now = new Date('2026-08-15T00:00:00Z');
-  const stale = computeQuota({ status: 'ACTIVE' }, { lifetimeCount: 500, windowKey: '2026-07', windowCount: 40 }, now);
-  assert.equal(stale.used, 0);
-  assert.equal(stale.remaining, POLICY.MONTHLY.limit);
+test('paid user counts only the CURRENT billing period; last period reads as 0 (auto-reset)', () => {
+  const now = new Date('2026-10-05T00:00:00Z');
+  const period = { status: 'ACTIVE', currentPeriodStart: '2026-10-02T00:00:00.000Z', currentPeriodEnd: '2026-11-02T00:00:00.000Z' };
+  const lastPeriodKey = `bp:${Date.parse('2026-09-02T00:00:00.000Z')}`;
+  const thisPeriodKey = `bp:${Date.parse('2026-10-02T00:00:00.000Z')}`;
 
-  const current = computeQuota({ status: 'ACTIVE' }, { lifetimeCount: 500, windowKey: '2026-08', windowCount: 40 }, now);
-  assert.equal(current.used, 40);
-  assert.equal(current.remaining, POLICY.MONTHLY.limit - 40);
+  const stale = computeQuota(period, { lifetimeCount: 500, windowKey: lastPeriodKey, windowCount: 15 }, now);
+  assert.equal(stale.used, 0, 'a fresh billing period starts the count over');
+  assert.equal(stale.remaining, 15);
+  assert.equal(stale.windowKey, thisPeriodKey);
+
+  const current = computeQuota(period, { lifetimeCount: 500, windowKey: thisPeriodKey, windowCount: 9 }, now);
+  assert.equal(current.used, 9);
+  assert.equal(current.remaining, 6);
+  assert.equal(current.periodEnd, period.currentPeriodEnd);
+});
+
+test('paid user at 15/15 in the current period -> remaining 0 (route blocks)', () => {
+  const now = new Date('2026-10-05T00:00:00Z');
+  const key = `bp:${Date.parse('2026-10-02T00:00:00.000Z')}`;
+  const q = computeQuota(
+    { status: 'ACTIVE', currentPeriodStart: '2026-10-02T00:00:00.000Z' },
+    { lifetimeCount: 999, windowKey: key, windowCount: 15 },
+    now
+  );
+  assert.equal(q.remaining, 0);
+  assert.equal(q.unlimited, false);
 });
 
 test('table not applied yet -> unlimited, never blocks (pure computeQuota / dev+test)', () => {

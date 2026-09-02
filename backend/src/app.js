@@ -18,6 +18,7 @@ const { CORS_ORIGINS, TRUST_PROXY, SUPABASE_HOST } = require('./config/env');
 const { apiLimiter } = require('./middleware/rateLimiters');
 const { notFound, jsonErrorHandler } = require('./middleware/errorHandlers');
 const adminRoutes = require('./routes/admin');
+const billingWebhookRoutes = require('./routes/billingWebhooks');
 const consumerRoutes = require('./routes');
 
 function createApp() {
@@ -57,6 +58,14 @@ function createApp() {
   app.use(compression());
   app.use(cors(CORS_ORIGINS.length ? { origin: CORS_ORIGINS } : {}));
   app.use(morgan('dev'));
+
+  // Recurring-billing webhooks (Stripe / Razorpay). Mounted BEFORE the JSON
+  // body parser and BEFORE the /api rate limiter on purpose: each handler must
+  // verify its signature against the exact received bytes, and a burst of
+  // provider retries must never be throttled by the blanket /api limiter. This
+  // router brings its own raw-body parser and a generous dedicated limiter.
+  app.use('/api/billing/webhook', billingWebhookRoutes);
+
   app.use(express.json({ limit: '5mb' }));
 
   app.use('/api', apiLimiter);

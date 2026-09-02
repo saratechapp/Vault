@@ -10,24 +10,28 @@ const currencyService = require('./services/currencyService');
 // the field names server.js already expects (cross-referenced against every
 // read/write site in server.js, not guessed).
 // ---------------------------------------------------------------------------
+// `updated_at` (added by 0030_sync_metadata.sql, auto-touched by trigger) is
+// read-only: it's in these maps so GET responses and /api/changes expose it,
+// but the write helpers never emit it (route patch builders don't carry it,
+// and upsert() strips it) so the trigger stays authoritative.
 const CATEGORY_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['icon', 'icon'], ['color', 'color'], ['parent_id', 'parentId'],
-  ['type', 'type'], ['sort_order', 'sortOrder'],
+  ['type', 'type'], ['sort_order', 'sortOrder'], ['updated_at', 'updatedAt'],
 ];
 const ACCOUNT_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['type', 'type'], ['opening_balance', 'openingBalance'],
   ['color', 'color'], ['icon', 'icon'], ['currency', 'currency'], ['institution', 'institution'],
-  ['credit_limit', 'creditLimit'], ['is_primary', 'isPrimary'],
+  ['credit_limit', 'creditLimit'], ['is_primary', 'isPrimary'], ['updated_at', 'updatedAt'],
 ];
 const TRANSACTION_FIELDS = [
   ['id', 'id'], ['date', 'date'], ['vendor', 'vendor'], ['category_id', 'categoryId'], ['amount', 'amount'], ['type', 'type'],
   ['payment_method', 'paymentMethod'], ['note', 'note'], ['labels', 'labels'], ['payer', 'payer'], ['payment_status', 'paymentStatus'],
   ['currency', 'currency'], ['account_id', 'accountId'], ['from_account_id', 'fromAccountId'], ['to_account_id', 'toAccountId'],
-  ['source_bill_id', 'sourceBillId'], ['source_debt_id', 'sourceDebtId'], ['goal_id', 'goalId'],
+  ['source_bill_id', 'sourceBillId'], ['source_debt_id', 'sourceDebtId'], ['goal_id', 'goalId'], ['updated_at', 'updatedAt'],
 ];
 const BUDGET_FIELDS = [
   ['id', 'id'], ['category_id', 'categoryId'], ['limit', 'limit'], ['period', 'period'],
-  ['alert_at', 'alertAt'], ['start_date', 'startDate'], ['end_date', 'endDate'],
+  ['alert_at', 'alertAt'], ['start_date', 'startDate'], ['end_date', 'endDate'], ['updated_at', 'updatedAt'],
 ];
 const BILL_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['type', 'type'], ['amount', 'amount'], ['due_date', 'dueDate'], ['frequency', 'frequency'],
@@ -38,6 +42,7 @@ const BILL_FIELDS = [
 const GOAL_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['icon', 'icon'], ['target', 'target'], ['saved', 'saved'], ['deadline', 'deadline'],
   ['priority', 'priority'], ['color', 'color'], ['monthly_contribution', 'monthlyContribution'], ['note', 'note'], ['account_id', 'accountId'],
+  ['updated_at', 'updatedAt'],
 ];
 const DEBT_FIELDS = [
   ['id', 'id'], ['name', 'name'], ['creditor', 'creditor'], ['balance', 'balance'], ['apr', 'apr'],
@@ -70,6 +75,15 @@ const PROFILE_FIELDS = [
   ['billing_currency', 'billingCurrency'], ['subscription_currency', 'subscriptionCurrency'],
   ['subscription_price_at_purchase', 'subscriptionPriceAtPurchase'],
   ['subscription_billing_period', 'subscriptionBillingPeriod'],
+  // Recurring-billing mirror (0029_subscription_billing.sql) — written only by
+  // the webhook handler (services/subscriptionBillingService.js) so the 0025
+  // read paths above keep working unchanged.
+  ['subscription_provider', 'subscriptionProvider'],
+  ['subscription_provider_customer_id', 'subscriptionProviderCustomerId'],
+  ['subscription_provider_subscription_id', 'subscriptionProviderSubscriptionId'],
+  ['subscription_current_period_start', 'subscriptionCurrentPeriodStart'],
+  ['subscription_current_period_end', 'subscriptionCurrentPeriodEnd'],
+  ['subscription_cancel_at_period_end', 'subscriptionCancelAtPeriodEnd'],
 ];
 
 const SUBSCRIPTION_SETTINGS_FIELDS = [
@@ -92,7 +106,40 @@ const SUBSCRIPTION_SETTINGS_DEFAULTS = Object.freeze({
 const SUBSCRIPTION_PRICE_FIELDS = [
   ['currency', 'currency'], ['monthly_price', 'monthlyPrice'], ['yearly_price', 'yearlyPrice'],
   ['enabled', 'enabled'], ['updated_at', 'updatedAt'], ['updated_by', 'updatedBy'],
+  // Provider plan/price ids per currency + cycle (0029_subscription_billing.sql).
+  // Null until a Super Admin fills them in; nothing hardcodes a plan id.
+  ['stripe_price_monthly', 'stripePriceMonthly'], ['stripe_price_yearly', 'stripePriceYearly'],
+  ['razorpay_plan_monthly', 'razorpayPlanMonthly'], ['razorpay_plan_yearly', 'razorpayPlanYearly'],
 ];
+// Which SUBSCRIPTION_PRICE_FIELDS columns arrived with 0029 — dropped from an
+// upsert and retried if the DB doesn't have them yet (0029 unapplied), the
+// same degradation updateSubscriptionSettings does for 0026's columns.
+const SUBSCRIPTION_PRICE_PROVIDER_COLUMNS = [
+  'stripe_price_monthly', 'stripe_price_yearly', 'razorpay_plan_monthly', 'razorpay_plan_yearly',
+];
+
+// Recurring billing (0029_subscription_billing.sql). `subscriptions` is the
+// provider-linked source of truth; the webhook handler is its only writer.
+const SUBSCRIPTION_FIELDS = [
+  ['id', 'id'], ['user_id', 'userId'], ['provider', 'provider'],
+  ['provider_customer_id', 'providerCustomerId'], ['provider_subscription_id', 'providerSubscriptionId'],
+  ['plan_id', 'planId'], ['plan_name', 'planName'], ['billing_cycle', 'billingCycle'],
+  ['amount', 'amount'], ['currency', 'currency'], ['status', 'status'],
+  ['trial_start_at', 'trialStartAt'], ['trial_end_at', 'trialEndAt'],
+  ['current_period_start', 'currentPeriodStart'], ['current_period_end', 'currentPeriodEnd'],
+  ['next_billing_date', 'nextBillingDate'], ['cancel_at_period_end', 'cancelAtPeriodEnd'],
+  ['provider_status', 'providerStatus'], ['latest_invoice_id', 'latestInvoiceId'],
+  ['created_at', 'createdAt'], ['updated_at', 'updatedAt'],
+];
+const SUBSCRIPTION_EVENT_FIELDS = [
+  ['id', 'id'], ['provider', 'provider'], ['type', 'type'], ['canonical_type', 'canonicalType'],
+  ['provider_subscription_id', 'providerSubscriptionId'], ['user_id', 'userId'],
+  ['payload', 'payload'], ['error', 'error'],
+  ['received_at', 'receivedAt'], ['processed_at', 'processedAt'],
+];
+// Live = a subscription that should currently grant (or is about to grant)
+// access. Matches the partial unique index in 0029.
+const LIVE_SUBSCRIPTION_STATUSES = ['incomplete', 'trialing', 'active', 'past_due', 'paused'];
 // Sessions (mobile Settings > Security > Sessions) — one row per
 // app-install/login, distinct from the append-only `login_events` history
 // table (adminDb.js). See 0022_sessions.sql for why this is a separate table
@@ -227,40 +274,109 @@ function stripUnknownColumns(row, error) {
   return removedAny ? next : null;
 }
 
-// Generic per-table insert/update/delete, all scoped to user_id so a caller
-// can never touch another user's row even if a route forgot to check first.
-function makeEntityHelpers(table, fields) {
-  return {
-    async insert(userId, data) {
-      const row = camelToSnakePatch(data, fields);
-      row.user_id = userId;
-      let { data: created, error } = await supabase.from(table).insert(row).select().single();
-      if (error && isMissingColumnError(error)) {
-        const retryRow = stripUnknownColumns(row, error);
-        if (retryRow) ({ data: created, error } = await supabase.from(table).insert(retryRow).select().single());
-      }
-      if (error) throw error;
-      return rowToCamel(created, fields);
-    },
-    async update(userId, id, patch) {
-      const row = camelToSnakePatch(patch, fields);
-      let { data: updated, error } = await supabase.from(table).update(row).eq('id', id).eq('user_id', userId).select().maybeSingle();
-      if (error && isMissingColumnError(error)) {
-        const retryRow = stripUnknownColumns(row, error);
-        if (retryRow) ({ data: updated, error } = await supabase.from(table).update(retryRow).eq('id', id).eq('user_id', userId).select().maybeSingle());
-      }
-      if (error) throw error;
-      return updated ? rowToCamel(updated, fields) : null;
-    },
-    async remove(userId, id) {
-      const { error } = await supabase.from(table).delete().eq('id', id).eq('user_id', userId);
-      if (error) throw error;
-    },
-  };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A permission-style error the route layer maps to 403 (see errorHandlers /
+// the route handlers' try/catch). Thrown when a client-supplied id already
+// belongs to a different user.
+function forbiddenError(message) {
+  const e = new Error(message || 'forbidden');
+  e.status = 403;
+  return e;
 }
 
-const categoryHelpers = makeEntityHelpers('categories', CATEGORY_FIELDS);
-const accountHelpers = makeEntityHelpers('accounts', ACCOUNT_FIELDS);
+// Records that `entityType/entityId` was deleted for this user, so a mobile
+// client that was offline at the time learns about it on its next
+// GET /api/changes pull. Best-effort: degrades to a no-op until
+// 0030_sync_metadata.sql is applied. `syncEntityType` is null for tables the
+// mobile app doesn't mirror (bills/debts/templates/conversations in Phase 1).
+async function writeTombstone(userId, syncEntityType, entityId) {
+  if (!syncEntityType) return;
+  try {
+    const { error } = await supabase
+      .from('sync_tombstones')
+      .upsert(
+        { user_id: userId, entity_type: syncEntityType, entity_id: entityId, deleted_at: new Date().toISOString() },
+        { onConflict: 'user_id,entity_type,entity_id' }
+      );
+    if (error && !isMissingTableError(error)) throw error;
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err;
+  }
+}
+
+// Generic per-table insert/update/delete, all scoped to user_id so a caller
+// can never touch another user's row even if a route forgot to check first.
+// `syncEntityType` (optional) opts the table into offline-sync support:
+// tombstone-on-delete and the client-id-aware `upsert` path.
+function makeEntityHelpers(table, fields, syncEntityType = null) {
+  async function insert(userId, data) {
+    const row = camelToSnakePatch(data, fields);
+    row.user_id = userId;
+    let { data: created, error } = await supabase.from(table).insert(row).select().single();
+    if (error && isMissingColumnError(error)) {
+      const retryRow = stripUnknownColumns(row, error);
+      if (retryRow) ({ data: created, error } = await supabase.from(table).insert(retryRow).select().single());
+    }
+    if (error) throw error;
+    return rowToCamel(created, fields);
+  }
+
+  async function update(userId, id, patch) {
+    const row = camelToSnakePatch(patch, fields);
+    let { data: updated, error } = await supabase.from(table).update(row).eq('id', id).eq('user_id', userId).select().maybeSingle();
+    if (error && isMissingColumnError(error)) {
+      const retryRow = stripUnknownColumns(row, error);
+      if (retryRow) ({ data: updated, error } = await supabase.from(table).update(retryRow).eq('id', id).eq('user_id', userId).select().maybeSingle());
+    }
+    if (error) throw error;
+    return updated ? rowToCamel(updated, fields) : null;
+  }
+
+  async function remove(userId, id) {
+    const { error } = await supabase.from(table).delete().eq('id', id).eq('user_id', userId);
+    if (error) throw error;
+    await writeTombstone(userId, syncEntityType, id);
+  }
+
+  // Insert-or-replace keyed on a client-generated `data.id`. Used by the
+  // POST routes so an offline-created row keeps the same primary key when it
+  // finally syncs, and a retried sync (flaky network) is idempotent rather
+  // than creating a duplicate. Falls back to a plain insert when no valid id
+  // is supplied — i.e. every existing web-app caller is unaffected.
+  async function upsert(userId, data) {
+    const id = data && data.id;
+    if (!id || !UUID_RE.test(String(id))) return insert(userId, data);
+
+    const { data: existing, error: selErr } = await supabase
+      .from(table)
+      .select('user_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (selErr) throw selErr;
+    if (existing && existing.user_id !== userId) throw forbiddenError('id belongs to another user');
+
+    const row = camelToSnakePatch(data, fields);
+    delete row.updated_at; // trigger-owned; never take the client's value
+    row.id = id;
+    row.user_id = userId;
+    let { data: saved, error } = await supabase.from(table).upsert(row, { onConflict: 'id' }).select().single();
+    if (error && isMissingColumnError(error)) {
+      const retryRow = stripUnknownColumns(row, error);
+      if (retryRow) {
+        retryRow.id = id;
+        ({ data: saved, error } = await supabase.from(table).upsert(retryRow, { onConflict: 'id' }).select().single());
+      }
+    }
+    if (error) throw error;
+    return rowToCamel(saved, fields);
+  }
+
+  return { insert, update, remove, upsert };
+}
+
+const categoryHelpers = makeEntityHelpers('categories', CATEGORY_FIELDS, 'category');
+const accountHelpers = makeEntityHelpers('accounts', ACCOUNT_FIELDS, 'account');
 
 // Clears is_primary on every one of the user's accounts except `keepId` (or
 // all of them, if omitted) — the app-side half of the "exactly one primary
@@ -274,13 +390,62 @@ async function unsetOtherPrimaryAccounts(userId, keepId) {
   const { error } = await q;
   if (error && !isMissingColumnError(error)) throw error;
 }
-const transactionHelpers = makeEntityHelpers('transactions', TRANSACTION_FIELDS);
-const budgetHelpers = makeEntityHelpers('budgets', BUDGET_FIELDS);
+const transactionHelpers = makeEntityHelpers('transactions', TRANSACTION_FIELDS, 'transaction');
+const budgetHelpers = makeEntityHelpers('budgets', BUDGET_FIELDS, 'budget');
 const billHelpers = makeEntityHelpers('bills', BILL_FIELDS);
-const goalHelpers = makeEntityHelpers('goals', GOAL_FIELDS);
+const goalHelpers = makeEntityHelpers('goals', GOAL_FIELDS, 'goal');
 const debtHelpers = makeEntityHelpers('debts', DEBT_FIELDS);
 const templateHelpers = makeEntityHelpers('templates', TEMPLATE_FIELDS);
 const conversationHelpers = makeEntityHelpers('ai_conversations', CONVERSATION_FIELDS);
+
+// ---------------------------------------------------------------------------
+// Offline-sync delta feed (GET /api/changes). Returns every mirrored row this
+// user has touched since `sinceIso` plus the tombstones for anything deleted
+// since then, so a reconnecting mobile client can catch up without re-pulling
+// its whole dataset. Degrades safely before 0030_sync_metadata.sql is
+// applied: no `updated_at` column -> return the full set; no tombstone table
+// -> return an empty tombstone list.
+// ---------------------------------------------------------------------------
+const SYNC_ENTITY_TABLES = [
+  ['transaction', 'transactions', TRANSACTION_FIELDS, 'transactions'],
+  ['account', 'accounts', ACCOUNT_FIELDS, 'accounts'],
+  ['category', 'categories', CATEGORY_FIELDS, 'categories'],
+  ['budget', 'budgets', BUDGET_FIELDS, 'budgets'],
+  ['goal', 'goals', GOAL_FIELDS, 'goals'],
+];
+
+async function getChangesSince(userId, sinceIso) {
+  const upserts = {};
+  for (const [, table, fields, pluralKey] of SYNC_ENTITY_TABLES) {
+    let query = supabase.from(table).select('*').eq('user_id', userId);
+    if (sinceIso) query = query.gt('updated_at', sinceIso);
+    let { data, error } = await query;
+    if (error && isMissingColumnError(error)) {
+      // Pre-0030: no updated_at to filter on — hand back the whole table and
+      // let the client reconcile by id.
+      ({ data, error } = await supabase.from(table).select('*').eq('user_id', userId));
+    }
+    if (error) throw error;
+    upserts[pluralKey] = rowsToCamel(data || [], fields);
+  }
+
+  let tombstones = [];
+  try {
+    let tq = supabase.from('sync_tombstones').select('*').eq('user_id', userId);
+    if (sinceIso) tq = tq.gt('deleted_at', sinceIso);
+    const { data, error } = await tq;
+    if (error && !isMissingTableError(error)) throw error;
+    tombstones = (data || []).map((r) => ({
+      entityType: r.entity_type,
+      entityId: r.entity_id,
+      deletedAt: r.deleted_at,
+    }));
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err;
+  }
+
+  return { cursor: new Date().toISOString(), upserts, tombstones };
+}
 
 async function insertBillPayment(userId, data) {
   const row = camelToSnakePatch(data, BILL_PAYMENT_FIELDS);
@@ -435,6 +600,8 @@ async function resolveForUser(userId, profileRow) {
   const profile = profileRow || (await getProfile(userId));
 
   if (profile && profile.subscriptionType) {
+    const cancelAtPeriodEnd = !!profile.subscriptionCancelAtPeriodEnd;
+    const currentPeriodEnd = profile.subscriptionCurrentPeriodEnd || null;
     return subscriptionService.toApiShape(
       {
         type: profile.subscriptionType,
@@ -442,6 +609,16 @@ async function resolveForUser(userId, profileRow) {
         trialEndsAt: profile.trialEndsAt,
         subscriptionStartedAt: profile.subscriptionStartedAt,
         subscriptionEndsAt: profile.subscriptionEndsAt,
+        // Recurring-billing mirror (0029) — null for anyone who never checked
+        // out through a provider, so pre-billing behaviour is unchanged.
+        provider: profile.subscriptionProvider,
+        billingCycle: profile.subscriptionBillingPeriod,
+        currentPeriodStart: profile.subscriptionCurrentPeriodStart,
+        currentPeriodEnd,
+        cancelAtPeriodEnd,
+        // A scheduled-to-cancel subscription has no next charge; otherwise the
+        // period end is when the provider will next attempt payment.
+        nextBillingDate: cancelAtPeriodEnd ? null : currentPeriodEnd,
       },
       now
     );
@@ -506,7 +683,11 @@ async function getSubscriptionPrices() {
   }
 }
 
-async function upsertSubscriptionPrice(currency, { monthlyPrice, yearlyPrice, enabled }, updatedBy) {
+async function upsertSubscriptionPrice(
+  currency,
+  { monthlyPrice, yearlyPrice, enabled, stripePriceMonthly, stripePriceYearly, razorpayPlanMonthly, razorpayPlanYearly },
+  updatedBy
+) {
   const row = {
     currency: String(currency).toUpperCase(),
     monthly_price: Math.max(0, Number(monthlyPrice) || 0),
@@ -515,8 +696,25 @@ async function upsertSubscriptionPrice(currency, { monthlyPrice, yearlyPrice, en
     updated_at: new Date().toISOString(),
     updated_by: updatedBy || null,
   };
-  const { data, error } = await supabase
+  // Only touch a provider-plan column when the caller actually passed it, so a
+  // price edit that doesn't mention plan ids never nulls existing ones. `null`
+  // is a deliberate "clear it"; `undefined` is "leave alone".
+  const nz = (v) => (v === undefined ? undefined : v === null || v === '' ? null : String(v).trim());
+  if (stripePriceMonthly !== undefined) row.stripe_price_monthly = nz(stripePriceMonthly);
+  if (stripePriceYearly !== undefined) row.stripe_price_yearly = nz(stripePriceYearly);
+  if (razorpayPlanMonthly !== undefined) row.razorpay_plan_monthly = nz(razorpayPlanMonthly);
+  if (razorpayPlanYearly !== undefined) row.razorpay_plan_yearly = nz(razorpayPlanYearly);
+
+  let { data, error } = await supabase
     .from('subscription_prices').upsert(row, { onConflict: 'currency' }).select().maybeSingle();
+  // 0029's provider-plan columns not applied yet — drop them and retry so the
+  // pre-0029 price edit still saves (same spirit as updateSubscriptionSettings
+  // for 0026's columns).
+  if (error && isMissingColumnError(error)) {
+    for (const col of SUBSCRIPTION_PRICE_PROVIDER_COLUMNS) delete row[col];
+    ({ data, error } = await supabase
+      .from('subscription_prices').upsert(row, { onConflict: 'currency' }).select().maybeSingle());
+  }
   if (error) {
     if (isMissingTableError(error)) throw pricingNotMigratedError();
     throw error;
@@ -586,6 +784,155 @@ async function resolvePricingForUser(profile, { localeHint, ipCountry, settings 
     currencies,
     selected,
   };
+}
+
+// ---------------------------------------------------------------------------
+// recurring billing (0029_subscription_billing.sql) — the `subscriptions` and
+// `subscription_events` tables. The webhook handler
+// (services/subscriptionBillingService.js) is the ONLY writer of subscription
+// state; consumer routes only ever read, or ask a provider adapter to act and
+// wait for the confirming webhook. Every read degrades to "no billing" if
+// 0029 hasn't been applied, exactly like getSubscriptionSettings for 0025.
+// ---------------------------------------------------------------------------
+
+async function subscriptionBillingMigrated() {
+  const { error } = await supabase.from('subscriptions').select('id', { head: true, count: 'exact' });
+  if (!error) return true;
+  if (isMissingTableError(error)) return false;
+  throw error;
+}
+
+// The user's current live subscription row (the one the partial unique index
+// guarantees is unique), or null.
+async function getLiveSubscriptionForUser(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('user_id', userId)
+      .in('status', LIVE_SUBSCRIPTION_STATUSES)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? rowToCamel(data, SUBSCRIPTION_FIELDS) : null;
+  } catch (err) {
+    if (isMissingTableError(err)) return null;
+    throw err;
+  }
+}
+
+async function getSubscriptionByProviderId(providerSubscriptionId) {
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('*')
+    .eq('provider_subscription_id', providerSubscriptionId)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? rowToCamel(data, SUBSCRIPTION_FIELDS) : null;
+}
+
+async function listSubscriptionsForUser(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return rowsToCamel(data || [], SUBSCRIPTION_FIELDS);
+  } catch (err) {
+    if (isMissingTableError(err)) return [];
+    throw err;
+  }
+}
+
+// Insert (checkout) or update (webhook) a subscription row. `patch` is
+// camelCase per SUBSCRIPTION_FIELDS. On insert, `userId` + `provider` are
+// required; on update, `id` selects the row.
+async function upsertSubscriptionRecord(patch) {
+  const row = camelToSnakePatch(patch, SUBSCRIPTION_FIELDS);
+  row.updated_at = new Date().toISOString();
+  if (patch.id) {
+    const { data, error } = await supabase
+      .from('subscriptions').update(row).eq('id', patch.id).select().maybeSingle();
+    if (error) throw error;
+    return data ? rowToCamel(data, SUBSCRIPTION_FIELDS) : null;
+  }
+  if (patch.userId) row.user_id = patch.userId;
+  // Prefer an idempotent upsert keyed on the provider's own subscription id so
+  // a webhook that arrives before the checkout row is written still lands one
+  // row, not two.
+  const onConflict = patch.providerSubscriptionId ? 'provider_subscription_id' : undefined;
+  const q = supabase.from('subscriptions').upsert(row, onConflict ? { onConflict } : undefined).select().maybeSingle();
+  const { data, error } = await q;
+  if (error) throw error;
+  return data ? rowToCamel(data, SUBSCRIPTION_FIELDS) : null;
+}
+
+// Idempotent: returns { created, event }. `created` is false when this
+// provider event id was already recorded (a replay) — the caller then skips
+// re-processing.
+async function recordSubscriptionEvent(evt) {
+  const row = {
+    id: evt.id,
+    provider: evt.provider,
+    type: evt.type || null,
+    canonical_type: evt.canonicalType || null,
+    provider_subscription_id: evt.providerSubscriptionId || null,
+    user_id: evt.userId || null,
+    payload: evt.payload ?? null,
+    received_at: new Date().toISOString(),
+  };
+  const { data, error } = await supabase
+    .from('subscription_events')
+    .insert(row)
+    .select()
+    .maybeSingle();
+  if (error) {
+    // Unique-violation on the primary key => we've already seen this event.
+    if (error.code === '23505') {
+      const existing = await supabase
+        .from('subscription_events').select('*').eq('id', evt.id).maybeSingle();
+      return { created: false, event: existing.data ? rowToCamel(existing.data, SUBSCRIPTION_EVENT_FIELDS) : null };
+    }
+    throw error;
+  }
+  return { created: true, event: rowToCamel(data, SUBSCRIPTION_EVENT_FIELDS) };
+}
+
+async function markSubscriptionEventProcessed(id, errorText) {
+  const { error } = await supabase
+    .from('subscription_events')
+    .update({ processed_at: new Date().toISOString(), error: errorText || null })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// Write the current state of a subscription onto the profiles.subscription_*
+// mirror (0025 + 0029 columns) so db.resolveForUser /
+// subscriptionService.computeStatus — the single source of premium truth —
+// see it without ever reading the `subscriptions` table. `mirror` is the
+// already-resolved shape the billing service computed.
+async function mirrorSubscriptionToProfile(userId, mirror) {
+  const patch = {
+    subscriptionType: mirror.subscriptionType,
+    subscriptionUpdatedAt: new Date().toISOString(),
+  };
+  if (mirror.trialStartedAt !== undefined) patch.trialStartedAt = mirror.trialStartedAt;
+  if (mirror.trialEndsAt !== undefined) patch.trialEndsAt = mirror.trialEndsAt;
+  if (mirror.subscriptionStartedAt !== undefined) patch.subscriptionStartedAt = mirror.subscriptionStartedAt;
+  if (mirror.subscriptionEndsAt !== undefined) patch.subscriptionEndsAt = mirror.subscriptionEndsAt;
+  if (mirror.billingPeriod !== undefined) patch.subscriptionBillingPeriod = mirror.billingPeriod;
+  if (mirror.priceAtPurchase !== undefined) patch.subscriptionPriceAtPurchase = mirror.priceAtPurchase;
+  if (mirror.currency !== undefined) patch.subscriptionCurrency = mirror.currency;
+  if (mirror.provider !== undefined) patch.subscriptionProvider = mirror.provider;
+  if (mirror.providerCustomerId !== undefined) patch.subscriptionProviderCustomerId = mirror.providerCustomerId;
+  if (mirror.providerSubscriptionId !== undefined) patch.subscriptionProviderSubscriptionId = mirror.providerSubscriptionId;
+  if (mirror.currentPeriodStart !== undefined) patch.subscriptionCurrentPeriodStart = mirror.currentPeriodStart;
+  if (mirror.currentPeriodEnd !== undefined) patch.subscriptionCurrentPeriodEnd = mirror.currentPeriodEnd;
+  if (mirror.cancelAtPeriodEnd !== undefined) patch.subscriptionCancelAtPeriodEnd = mirror.cancelAtPeriodEnd;
+  return updateProfile(userId, patch);
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +1237,14 @@ module.exports = {
   deleteSubscriptionPrice,
   subscriptionPricingMigrated,
   resolvePricingForUser,
+  subscriptionBillingMigrated,
+  getLiveSubscriptionForUser,
+  getSubscriptionByProviderId,
+  listSubscriptionsForUser,
+  upsertSubscriptionRecord,
+  recordSubscriptionEvent,
+  markSubscriptionEventProcessed,
+  mirrorSubscriptionToProfile,
   getNotificationOverlay,
   upsertNotificationOverlay,
   markAllNotificationsRead,
@@ -918,12 +1273,18 @@ module.exports = {
   deleteOldConversations,
   AI_HISTORY_RETENTION_DAYS,
   insertCategory: categoryHelpers.insert, updateCategory: categoryHelpers.update, deleteCategory: categoryHelpers.remove,
+  upsertCategory: categoryHelpers.upsert,
   insertAccount: accountHelpers.insert, updateAccount: accountHelpers.update, deleteAccount: accountHelpers.remove,
+  upsertAccount: accountHelpers.upsert,
   unsetOtherPrimaryAccounts,
   insertTransaction: transactionHelpers.insert, updateTransaction: transactionHelpers.update, deleteTransaction: transactionHelpers.remove,
+  upsertTransaction: transactionHelpers.upsert,
   insertBudget: budgetHelpers.insert, updateBudget: budgetHelpers.update, deleteBudget: budgetHelpers.remove,
+  upsertBudget: budgetHelpers.upsert,
   insertBill: billHelpers.insert, updateBill: billHelpers.update, deleteBill: billHelpers.remove,
   insertGoal: goalHelpers.insert, updateGoal: goalHelpers.update, deleteGoal: goalHelpers.remove,
+  upsertGoal: goalHelpers.upsert,
+  getChangesSince,
   insertDebt: debtHelpers.insert, updateDebt: debtHelpers.update, deleteDebt: debtHelpers.remove,
   insertTemplate: templateHelpers.insert, updateTemplate: templateHelpers.update, deleteTemplate: templateHelpers.remove,
   insertConversation: conversationHelpers.insert, updateConversation: conversationHelpers.update, deleteConversation: conversationHelpers.remove,

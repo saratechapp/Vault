@@ -24,6 +24,7 @@ const { securityLog } = require('../lib/securityLog');
 const { scanUpload } = require('../middleware/scanUpload');
 const { scanReceipts } = require('../services/receiptScanService');
 const receiptScanQuota = require('../services/receiptScanQuota');
+const subscriptionBilling = require('../services/subscriptionBillingService');
 const { sendJSON, bumpCache } = require('../lib/httpCache');
 const { buildSafeUser } = require('../lib/safeUser');
 const { countryFromHeaders } = require('../lib/geoIp');
@@ -60,6 +61,45 @@ const assistantEngine = require('../services/assistantEngine');
 const insightsCache = require('../services/cache');
 
 const router = express.Router();
+
+// ---------------------------------------------------------------------------
+// Offline-first mobile sync helpers, shared by the entity POST/PATCH routes.
+// All no-ops for a request that doesn't opt in (no `id` / no `baseUpdatedAt`
+// in the body), so the web app's behaviour is unchanged.
+// ---------------------------------------------------------------------------
+const CLIENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A valid client-generated primary key from the request body, or null. When
+// present, the POST routes route through db.upsertX (idempotent by id) so a
+// row created offline keeps its id on first sync and a retried sync can't
+// create a duplicate.
+function clientId(req) {
+  const id = req.body && req.body.id;
+  return typeof id === 'string' && CLIENT_UUID_RE.test(id) ? id : null;
+}
+
+// True (and sends 409) when the caller's optimistic `baseUpdatedAt` is older
+// than the row's live `updated_at` — the "server row moved under me" case the
+// mobile sync engine resolves (conflicts.ts). Inert when the client sent no
+// baseline or 0030_sync_metadata.sql isn't applied yet (no updatedAt).
+function isStaleWrite(req, res, existing) {
+  const base = req.body && req.body.baseUpdatedAt;
+  if (!base || !existing || !existing.updatedAt) return false;
+  if (new Date(existing.updatedAt).getTime() > new Date(base).getTime()) {
+    res.status(409).json({ error: 'conflict', server: existing });
+    return true;
+  }
+  return false;
+}
+
+// Merge a just-upserted row back into the in-memory request bundle without
+// duplicating it when the id already existed (idempotent re-POST).
+function mergeIntoBundle(list, row) {
+  const i = list.findIndex((x) => x.id === row.id);
+  if (i === -1) list.push(row);
+  else list[i] = { ...list[i], ...row };
+  return row;
+}
 
 // bill payment posting — shared by the manual "Mark as Paid" branch of
 // PATCH /api/bills/:id below (the only way a bill ever posts a transaction
@@ -229,6 +269,97 @@ router.patch('/api/subscription/currency', requireAuth, ah(async (req, res) => {
     ipCountry: countryFromHeaders(req),
   });
   res.json({ pricing });
+}));
+
+// ---- recurring billing (Stripe / Razorpay) --------------------------------
+// The provider collects every recurring payment; this backend only creates the
+// provider subscription, asks it to cancel/resume, and reacts to verified
+// webhooks (POST /api/billing/webhook/{stripe,razorpay}, its own unauthed
+// router mounted in src/app.js). Nothing here trusts a client-supplied amount,
+// currency, plan or status — see services/subscriptionBillingService.js.
+
+const billingError = (res, err) => {
+  if (err instanceof subscriptionBilling.BillingError) {
+    const { message, httpStatus, code, provider, ...rest } = err;
+    return res.status(httpStatus || 400).json({ error: code || message, provider, ...pickExtra(rest) });
+  }
+  throw err;
+};
+const pickExtra = (o) => {
+  const out = {};
+  for (const k of ['currency', 'billingCycle']) if (o[k] !== undefined) out[k] = o[k];
+  return out;
+};
+
+// What provider + publishable id the app should init its SDK with.
+router.get('/api/billing/config', requireAuth, ah(async (req, res) => {
+  const cfg = await subscriptionBilling.billingConfig(req.userId, req);
+  res.json(cfg);
+}));
+
+// Create the provider subscription for the chosen cycle and return everything
+// the native Stripe PaymentSheet / Razorpay Checkout needs to capture the
+// mandate + first payment. Body: { billingCycle: 'monthly' | 'yearly' }.
+router.post('/api/billing/subscribe', requireAuth, ah(async (req, res) => {
+  const billingCycle = String((req.body && req.body.billingCycle) || '').toLowerCase();
+  try {
+    const out = await subscriptionBilling.startCheckout({
+      userId: req.userId,
+      email: req.userEmail,
+      billingCycle,
+      req,
+    });
+    res.json(out);
+  } catch (err) {
+    return billingError(res, err);
+  }
+}));
+
+// Optional fast-path the app calls right after the sheet closes so the UI
+// doesn't wait on the webhook. Webhook stays the source of truth.
+// Body (razorpay): { provider, razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
+// Body (stripe):   { provider }
+router.post('/api/billing/verify', requireAuth, ah(async (req, res) => {
+  const body = req.body || {};
+  const provider = String(body.provider || '').toLowerCase();
+  if (provider !== 'stripe' && provider !== 'razorpay') {
+    return res.status(400).json({ error: 'invalid_provider' });
+  }
+  try {
+    const status = await subscriptionBilling.verifyCheckout({
+      userId: req.userId,
+      provider,
+      params: {
+        razorpay_payment_id: body.razorpay_payment_id,
+        razorpay_subscription_id: body.razorpay_subscription_id,
+        razorpay_signature: body.razorpay_signature,
+      },
+    });
+    res.json(status);
+  } catch (err) {
+    return billingError(res, err);
+  }
+}));
+
+// Cancel at period end — premium stays until currentPeriodEnd, no further
+// renewal. Never deletes the record.
+router.post('/api/billing/cancel', requireAuth, ah(async (req, res) => {
+  try {
+    const status = await subscriptionBilling.cancel({ userId: req.userId });
+    res.json(status);
+  } catch (err) {
+    return billingError(res, err);
+  }
+}));
+
+// Undo a scheduled cancellation (Stripe only; Razorpay has no un-cancel API).
+router.post('/api/billing/resume', requireAuth, ah(async (req, res) => {
+  try {
+    const status = await subscriptionBilling.resume({ userId: req.userId });
+    res.json(status);
+  } catch (err) {
+    return billingError(res, err);
+  }
 }));
 
 router.patch('/api/me', requireAuth, ah(async (req, res) => {
@@ -604,6 +735,20 @@ router.get('/api/dashboard', requireAuth, ah(async (req, res) => {
   });
 }));
 
+// ---- offline-first mobile sync: delta feed ----
+// GET /api/changes?since=<ISO> — every mirrored row this user has touched
+// since `since` plus tombstones for anything deleted since then. The mobile
+// sync engine calls this on reconnect/foreground to catch up without
+// re-downloading its whole dataset. Web never calls it. Auth + user scoping
+// come from requireAuth + db.getChangesSince's own `.eq('user_id', ...)`.
+router.get('/api/changes', requireAuth, ah(async (req, res) => {
+  const since = typeof req.query.since === 'string' && req.query.since ? req.query.since : null;
+  if (since && Number.isNaN(new Date(since).getTime())) {
+    return res.status(400).json({ error: 'since must be an ISO timestamp' });
+  }
+  res.json(await db.getChangesSince(req.userId, since));
+}));
+
 // ---- dashboard layout (custom widget grid, persisted per user, synced across devices) ----
 router.get('/api/dashboard-layout', requireAuth, (req, res) => sendJSON(req, res, req.userData.dashboardLayout));
 
@@ -631,11 +776,12 @@ router.post('/api/categories', requireAuth, ah(async (req, res) => {
   if (type !== undefined && type !== null && !CATEGORY_TYPES.includes(type)) {
     return res.status(400).json({ error: 'type must be income, expense, transfer, or null' });
   }
-  const cat = await db.insertCategory(req.userId, {
+  const cat = await db.upsertCategory(req.userId, {
+    id: clientId(req) || undefined,
     name, icon: icon || 'Circle', color: color || '#6366f1', parentId: parentId || null,
     type: type ?? null, sortOrder: Number.isInteger(sortOrder) ? sortOrder : 0,
   });
-  req.userData.categories.push(cat);
+  mergeIntoBundle(req.userData.categories, cat);
   bumpCache(req.userId);
   res.status(201).json(cat);
 }));
@@ -665,6 +811,7 @@ router.patch('/api/categories/reorder', requireAuth, ah(async (req, res) => {
 router.patch('/api/categories/:id', requireAuth, ah(async (req, res) => {
   const cat = req.userData.categories.find((c) => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'not found' });
+  if (isStaleWrite(req, res, cat)) return;
   const { name, icon, color, parentId, type, sortOrder } = req.body || {};
   if (parentId !== undefined && parentId) {
     if (parentId === cat.id) return res.status(400).json({ error: 'a category cannot be its own parent' });
@@ -712,7 +859,9 @@ router.get('/api/accounts', requireAuth, (req, res) => sendJSON(req, res, comput
 router.post('/api/accounts', requireAuth, ah(async (req, res) => {
   const { name, type, openingBalance, color, icon, currency, institution, isPrimary } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
-  if (!assertUnderLimit(req, res, 'accounts', req.userData.accounts.length)) return;
+  const id = clientId(req);
+  const knownId = id && req.userData.accounts.some((a) => a.id === id);
+  if (!knownId && !assertUnderLimit(req, res, 'accounts', req.userData.accounts.length)) return;
   // A user's very first account is always primary (there'd otherwise be no
   // primary account at all); after that, primary is opt-in but exclusive —
   // marking this one primary unsets whichever account held it before.
@@ -721,8 +870,8 @@ router.post('/api/accounts', requireAuth, ah(async (req, res) => {
     await db.unsetOtherPrimaryAccounts(req.userId);
     req.userData.accounts.forEach((a) => { a.isPrimary = false; });
   }
-  const acc = await db.insertAccount(req.userId, { name, type: type || 'bank', openingBalance: numOr(openingBalance), color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '', isPrimary: makePrimary });
-  req.userData.accounts.push(acc);
+  const acc = await db.upsertAccount(req.userId, { id: id || undefined, name, type: type || 'bank', openingBalance: numOr(openingBalance), color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '', isPrimary: makePrimary });
+  mergeIntoBundle(req.userData.accounts, acc);
   bumpCache(req.userId);
   res.status(201).json(computeAccounts(req.userData).find((a) => a.id === acc.id));
 }));
@@ -730,6 +879,7 @@ router.post('/api/accounts', requireAuth, ah(async (req, res) => {
 router.patch('/api/accounts/:id', requireAuth, ah(async (req, res) => {
   const acc = req.userData.accounts.find((a) => a.id === req.params.id);
   if (!acc) return res.status(404).json({ error: 'not found' });
+  if (isStaleWrite(req, res, acc)) return;
   // The only way to move primary off this account is to mark a different one
   // primary instead — an explicit un-check here would leave the user with no
   // primary account at all, so it's rejected rather than silently allowed.
@@ -860,9 +1010,13 @@ router.post('/api/transactions', requireAuth, ah(async (req, res) => {
   }
   const badField = foreignAccountField(req.userData, body, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
-  if (!assertUnderLimit(req, res, 'transactions', req.userData.transactions.length)) return;
-  const txn = await db.insertTransaction(req.userId, buildTransactionFromBody(body, undefined, req.userData.categories));
-  req.userData.transactions.push(txn);
+  const id = clientId(req);
+  const knownId = id && req.userData.transactions.some((t) => t.id === id);
+  if (!knownId && !assertUnderLimit(req, res, 'transactions', req.userData.transactions.length)) return;
+  const payload = buildTransactionFromBody(body, undefined, req.userData.categories);
+  if (id) payload.id = id;
+  const txn = await db.upsertTransaction(req.userId, payload);
+  mergeIntoBundle(req.userData.transactions, txn);
   bumpCache(req.userId);
   res.status(201).json(txn);
 }));
@@ -871,6 +1025,7 @@ router.patch('/api/transactions/:id', requireAuth, ah(async (req, res) => {
   const idx = req.userData.transactions.findIndex((t) => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'not found' });
   const existing = req.userData.transactions[idx];
+  if (isStaleWrite(req, res, existing)) return;
   const body = req.body || {};
   const badField = foreignAccountField(req.userData, body, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
@@ -943,9 +1098,11 @@ router.get('/api/budgets', requireAuth, (req, res) => {
 router.post('/api/budgets', requireAuth, ah(async (req, res) => {
   const { categoryId, limit, period, alertAt, startDate, endDate } = req.body || {};
   if (!categoryId || !limit) return res.status(400).json({ error: 'categoryId and limit are required' });
-  if (!assertUnderLimit(req, res, 'budgets', req.userData.budgets.length)) return;
-  const budget = await db.insertBudget(req.userId, { categoryId, limit: Number(limit), period: period || 'monthly', alertAt: alertAt !== undefined ? Number(alertAt) : 80, startDate: startDate || null, endDate: endDate || null });
-  req.userData.budgets.push(budget);
+  const id = clientId(req);
+  const knownId = id && req.userData.budgets.some((x) => x.id === id);
+  if (!knownId && !assertUnderLimit(req, res, 'budgets', req.userData.budgets.length)) return;
+  const budget = await db.upsertBudget(req.userId, { id: id || undefined, categoryId, limit: Number(limit), period: period || 'monthly', alertAt: alertAt !== undefined ? Number(alertAt) : 80, startDate: startDate || null, endDate: endDate || null });
+  mergeIntoBundle(req.userData.budgets, budget);
   bumpCache(req.userId);
   res.status(201).json(budget);
 }));
@@ -953,6 +1110,7 @@ router.post('/api/budgets', requireAuth, ah(async (req, res) => {
 router.patch('/api/budgets/:id', requireAuth, ah(async (req, res) => {
   const b = req.userData.budgets.find((x) => x.id === req.params.id);
   if (!b) return res.status(404).json({ error: 'not found' });
+  if (isStaleWrite(req, res, b)) return;
   const patch = {};
   ['categoryId', 'limit', 'period', 'alertAt', 'startDate', 'endDate'].forEach((f) => {
     if (req.body[f] !== undefined) patch[f] = f === 'limit' || f === 'alertAt' ? Number(req.body[f]) : req.body[f];
@@ -1186,14 +1344,17 @@ router.post('/api/goals', requireAuth, ah(async (req, res) => {
   if (err) return res.status(400).json({ error: err });
   const b = req.body;
   if (!ownsAccount(req.userData, b.accountId)) return res.status(400).json({ error: 'accountId must reference one of your own accounts' });
-  if (!assertUnderLimit(req, res, 'goals', req.userData.goals.length)) return;
-  const goal = await db.insertGoal(req.userId, {
+  const id = clientId(req);
+  const knownId = id && req.userData.goals.some((g) => g.id === id);
+  if (!knownId && !assertUnderLimit(req, res, 'goals', req.userData.goals.length)) return;
+  const goal = await db.upsertGoal(req.userId, {
+    id: id || undefined,
     name: b.name, icon: b.icon || 'Target', target: Number(b.target),
     saved: numOr(b.saved), deadline: b.deadline || null, priority: b.priority || 'medium',
     color: b.color || '#6366f1', monthlyContribution: numOr(b.monthlyContribution),
     note: b.note || '', accountId: b.accountId || null,
   });
-  req.userData.goals.push(goal);
+  mergeIntoBundle(req.userData.goals, goal);
   bumpCache(req.userId);
   res.status(201).json(goal);
 }));
@@ -1201,6 +1362,7 @@ router.post('/api/goals', requireAuth, ah(async (req, res) => {
 router.patch('/api/goals/:id', requireAuth, ah(async (req, res) => {
   const goal = req.userData.goals.find((g) => g.id === req.params.id);
   if (!goal) return res.status(404).json({ error: 'not found' });
+  if (isStaleWrite(req, res, goal)) return;
   const err = validateGoal(req.body || {}, goal);
   if (err) return res.status(400).json({ error: err });
   if (!ownsAccount(req.userData, req.body?.accountId)) return res.status(400).json({ error: 'accountId must reference one of your own accounts' });

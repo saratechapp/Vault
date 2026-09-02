@@ -35,13 +35,33 @@ function policyFor(subscription) {
   return { plan: 'free', ...POLICY.FREE };
 }
 
-// 'YYYY' for a yearly window, 'YYYY-MM' for a monthly one, 'lifetime'
-// otherwise. UTC so the boundary is deterministic regardless of server TZ.
-function windowKeyFor(scope, now = new Date()) {
+// The counter key that defines "this allowance window":
+//   'lifetime'                 -> the free 3-ever cap
+//   'YYYY' / 'YYYY-MM'         -> legacy calendar year / month
+//   'bp:<ms>'                  -> a billing period: the ms timestamp of the
+//                                subscription's current_period_start. It
+//                                changes the instant a renewal webhook
+//                                advances the period, so the count resets on
+//                                the actual billing anniversary, not the 1st
+//                                of the month. `subscription` is the resolved
+//                                status object from db.resolveForUser (carries
+//                                currentPeriodStart once the user has a
+//                                provider subscription).
+// UTC so calendar boundaries are deterministic regardless of server TZ.
+function windowKeyFor(scope, now = new Date(), subscription = null) {
   if (scope === 'lifetime') return 'lifetime';
   const y = now.getUTCFullYear();
+  const monthKey = `${y}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
   if (scope === 'year') return String(y);
-  return `${y}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  if (scope === 'billing_period') {
+    const start = subscription && subscription.currentPeriodStart;
+    const t = start ? Date.parse(start) : NaN;
+    // Pre-checkout auto-trial (0025) has no provider period yet -> nearest
+    // equivalent is the calendar month, which is also what a lapsed trial /
+    // free user would already be keyed on.
+    return Number.isNaN(t) ? monthKey : `bp:${t}`;
+  }
+  return monthKey;
 }
 
 // Pure: (subscription status, raw counter row) -> quota object. `counters`
@@ -50,11 +70,12 @@ function windowKeyFor(scope, now = new Date()) {
 function computeQuota(subscription, counters, now = new Date()) {
   const pol = policyFor(subscription);
   const enforced = POLICY.ENFORCED && !(counters && counters.unavailable);
+  const windowKey = windowKeyFor(pol.scope, now, subscription);
 
   const used =
     pol.scope === 'lifetime'
       ? (counters && counters.lifetimeCount) || 0
-      : counters && counters.windowKey === windowKeyFor(pol.scope, now)
+      : counters && counters.windowKey === windowKey
         ? counters.windowCount || 0
         : 0;
 
@@ -70,6 +91,14 @@ function computeQuota(subscription, counters, now = new Date()) {
     remaining: unlimited ? null : Math.max(0, limit - used),
     unlimited,
     enforced,
+    // The exact counter key this quota was computed against — record() reuses
+    // it so the bump lands in the same window the check read.
+    windowKey,
+    // The subscription period this allowance follows, so the app can show
+    // "resets on <date>" without hardcoding a month boundary. Null for the
+    // lifetime (free) and calendar-month (pre-checkout trial) windows.
+    periodStart: (subscription && subscription.currentPeriodStart) || null,
+    periodEnd: (subscription && subscription.currentPeriodEnd) || null,
     // True only when the counter store couldn't be read (table missing /
     // unreachable). The pure math above still degrades to "no cap" for
     // dev/test; resolve() decides whether that degradation is acceptable
@@ -100,7 +129,10 @@ async function resolve(userId, subscription) {
 // resolve() returned at the top of the same request.
 async function record(userId, resolvedQuota) {
   if (!resolvedQuota.enforced) return resolvedQuota; // nothing to count
-  const bumped = await db.bumpReceiptScanCounter(userId, windowKeyFor(resolvedQuota.scope));
+  // Reuse the exact key the check was computed against (billing_period keys
+  // can't be recomputed here without the subscription object).
+  const windowKey = resolvedQuota.windowKey || windowKeyFor(resolvedQuota.scope);
+  const bumped = await db.bumpReceiptScanCounter(userId, windowKey);
   const used = resolvedQuota.scope === 'lifetime' ? bumped.lifetimeCount : bumped.windowCount;
   const limit = resolvedQuota.limit;
   return {

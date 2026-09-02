@@ -112,6 +112,12 @@ function isoOrNull(value) {
 // The exact object the consumer app and admin panel consume. `daysRemaining`
 // is a convenience — the frontend also recomputes it from trialEndDate so
 // the countdown stays live without a refetch.
+//
+// The `provider*` / `currentPeriod*` / `cancelAtPeriodEnd` / `billingCycle` /
+// `nextBillingDate` fields are additive (0029_subscription_billing.sql) — the
+// recurring-billing mirror on the profiles row. They read back null for any
+// user who has never gone through provider checkout, so every pre-billing
+// caller/consumer is unaffected.
 function toApiShape(sub = {}, now = new Date()) {
   const status = computeStatus(sub, now);
   const relevantEnd =
@@ -127,6 +133,12 @@ function toApiShape(sub = {}, now = new Date()) {
       status === STATUS.FREE_TRIAL || status === STATUS.ACTIVE
         ? daysRemaining(relevantEnd, now)
         : 0,
+    provider: sub.provider || null,
+    billingCycle: sub.billingCycle || null,
+    currentPeriodStart: isoOrNull(sub.currentPeriodStart),
+    currentPeriodEnd: isoOrNull(sub.currentPeriodEnd),
+    nextBillingDate: isoOrNull(sub.nextBillingDate),
+    cancelAtPeriodEnd: !!sub.cancelAtPeriodEnd,
   };
 }
 

@@ -26,6 +26,14 @@ function subShapeFromProfile(row, now) {
       trialEndsAt: row.trialEndsAt,
       subscriptionStartedAt: row.subscriptionStartedAt,
       subscriptionEndsAt: row.subscriptionEndsAt,
+      // Recurring-billing mirror (0029) — surfaced read-only for support. Null
+      // for anyone who never checked out through a provider.
+      provider: row.subscriptionProvider,
+      billingCycle: row.subscriptionBillingPeriod,
+      currentPeriodStart: row.subscriptionCurrentPeriodStart,
+      currentPeriodEnd: row.subscriptionCurrentPeriodEnd,
+      cancelAtPeriodEnd: row.subscriptionCancelAtPeriodEnd,
+      nextBillingDate: row.subscriptionCancelAtPeriodEnd ? null : row.subscriptionCurrentPeriodEnd,
     },
     now
   );
@@ -185,7 +193,10 @@ router.put('/prices/:currency', requireSuperAdmin, ah(async (req, res) => {
   if (!currencyService.CURRENCY_META[currency]) {
     return res.status(400).json({ error: 'unsupported_currency' });
   }
-  const { monthlyPrice, yearlyPrice, enabled } = req.body || {};
+  const {
+    monthlyPrice, yearlyPrice, enabled,
+    stripePriceMonthly, stripePriceYearly, razorpayPlanMonthly, razorpayPlanYearly,
+  } = req.body || {};
   for (const [k, v] of [['monthlyPrice', monthlyPrice], ['yearlyPrice', yearlyPrice]]) {
     const n = Number(v);
     if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: `${k} must be a number >= 0` });
@@ -193,12 +204,29 @@ router.put('/prices/:currency', requireSuperAdmin, ah(async (req, res) => {
   if (enabled !== undefined && typeof enabled !== 'boolean') {
     return res.status(400).json({ error: 'enabled must be a boolean' });
   }
+  // Provider plan/price ids (0029). '' clears; a non-empty value must look
+  // like an id string. undefined leaves the stored value alone.
+  for (const [k, v] of [
+    ['stripePriceMonthly', stripePriceMonthly], ['stripePriceYearly', stripePriceYearly],
+    ['razorpayPlanMonthly', razorpayPlanMonthly], ['razorpayPlanYearly', razorpayPlanYearly],
+  ]) {
+    if (v !== undefined && v !== null && typeof v !== 'string') {
+      return res.status(400).json({ error: `${k} must be a string` });
+    }
+    if (typeof v === 'string' && v.length > 120) {
+      return res.status(400).json({ error: `${k} is too long` });
+    }
+  }
 
   let existing = null;
   let after;
   try {
     existing = (await db.getSubscriptionPrices()).find((p) => p.currency === currency) || null;
-    after = await db.upsertSubscriptionPrice(currency, { monthlyPrice, yearlyPrice, enabled }, req.admin.id);
+    after = await db.upsertSubscriptionPrice(
+      currency,
+      { monthlyPrice, yearlyPrice, enabled, stripePriceMonthly, stripePriceYearly, razorpayPlanMonthly, razorpayPlanYearly },
+      req.admin.id
+    );
   } catch (err) {
     if (err.code === 'PRICING_NOT_MIGRATED') return res.status(409).json({ error: 'pricing_not_migrated', message: NOT_MIGRATED_MSG });
     throw err;
