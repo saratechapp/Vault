@@ -4,6 +4,7 @@ import { api } from '../lib/api.js';
 import { touchActivity, clearActivity, isIdleExpired, markSessionExpired } from '../lib/idleSession.js';
 import { setCurrentUserId } from '../lib/userScope.js';
 import { consumeImpersonationEntry } from '../lib/impersonation.js';
+import { getWebSessionId, getWebDeviceLabel } from '../lib/deviceSession.js';
 
 const AuthContext = createContext(null);
 
@@ -52,7 +53,15 @@ export function AuthProvider({ children }) {
         const method = consumeImpersonationEntry()
           ? 'impersonation'
           : newSession.user?.app_metadata?.provider === 'google' ? 'google' : 'password';
-        api.post('/login-events', { method }).catch(() => {
+        // Register this browser as a device session so Settings > Security >
+        // Active sessions lists it and the 2FA step-up gate can mark it
+        // verified. Mobile already sends these fields; web now does too.
+        api.post('/login-events', {
+          method,
+          sessionId: getWebSessionId(),
+          platform: 'web',
+          deviceLabel: getWebDeviceLabel(),
+        }).catch(() => {
           // best-effort — never block sign-in on this
         });
       }
@@ -99,6 +108,10 @@ export function AuthProvider({ children }) {
   // merely added mid-session — so neither survived a page refresh correctly.
   const needsPassword = !!session && userLoaded && user !== null && !user.hasPassword;
   const ready = sessionReady && (!session || userLoaded);
+  // 2FA is enabled on this account but the current browser session hasn't
+  // passed the email-OTP step-up yet — routing sends the user to /two-factor.
+  // `twoFactorVerified` is computed server-side per session on GET /api/me.
+  const twoFactorPending = !!user && user.twoFactorEnabled === true && user.twoFactorVerified === false;
 
   // Persisted before calling loginWithPassword/loginWithOAuth so the *next*
   // page load's supabaseClient picks the right storage (see lib/supabaseClient.js
@@ -233,12 +246,12 @@ export function AuthProvider({ children }) {
 
   const value = useMemo(
     () => ({
-      user, userId, isAuthed: !!session, ready, needsPassword, impersonation,
+      user, userId, isAuthed: !!session, ready, needsPassword, twoFactorPending, impersonation,
       loginWithOAuth, loginWithPassword, startEmailSignup, verifyEmailOtp, resendEmailOtp,
       setAccountPassword, sendPasswordReset, setRememberMe,
       logout, exitImpersonation, setUser,
     }),
-    [user, userId, session, ready, needsPassword, impersonation, loginWithOAuth, loginWithPassword, startEmailSignup, verifyEmailOtp, resendEmailOtp, setAccountPassword, sendPasswordReset, setRememberMe, logout, exitImpersonation]
+    [user, userId, session, ready, needsPassword, twoFactorPending, impersonation, loginWithOAuth, loginWithPassword, startEmailSignup, verifyEmailOtp, resendEmailOtp, setAccountPassword, sendPasswordReset, setRememberMe, logout, exitImpersonation]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -9,7 +9,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { accountsApi, transactionsApi, billsApi, notificationsApi } from '../lib/api.js';
 import { useTxCreatedListener } from '../context/NewTransactionContext.jsx';
 
-const NAV = [
+export const NAV = [
   { to: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/app/accounts', label: 'Accounts', icon: CreditCard, badgeKey: 'accounts' },
   { to: '/app/transactions', label: 'Transactions', icon: ArrowLeftRight, badgeKey: 'transactions' },

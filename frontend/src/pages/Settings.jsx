@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   User, SlidersHorizontal, Tags, FileStack, Bell, ShieldCheck, DatabaseBackup, LifeBuoy,
-  LogOut, Plus, Pencil, Trash2, RefreshCw, Lock, Unlock, ChevronRight,
+  LogOut, Plus, Pencil, Trash2, RefreshCw, Lock, Unlock, ChevronRight, Monitor, Upload,
 } from 'lucide-react';
 import {
   Avatar, Button, Card, CardHeader, Field, Input, Select, Textarea, Toggle, ToggleRow, Modal, IconPicker, IconButton, DynamicIcon, EmptyState,
@@ -11,8 +11,11 @@ import { FeedbackFormModal } from '../components/feedback/FeedbackFormModal.jsx'
 import { CATEGORY_COLORS } from '../lib/categoryIcons.js';
 import { CURRENCIES, COUNTRIES, LANGUAGES, DATE_FORMATS, getCurrencyMeta } from '../lib/preferences.js';
 import {
-  api, categoriesApi, templatesApi, accountsApi, transactionsApi, budgetsApi, billsApi, goalsApi, debtsApi, formatCurrency,
+  api, categoriesApi, templatesApi, accountsApi, formatCurrency,
+  sessionsApi, twoFactorApi, dataApi,
 } from '../lib/api.js';
+import { supabase } from '../lib/supabaseClient.js';
+import { getWebSessionId } from '../lib/deviceSession.js';
 import { fetchRates } from '../lib/fx.js';
 import { hasPin, setPin as savePin, removePin, lockNow } from '../lib/pin.js';
 import { isPasswordValid, passwordValidationError } from '../lib/passwordValidation.js';
@@ -34,35 +37,71 @@ const SECTIONS = [
 // ---------------------------------------------------------------------------
 function ProfilePanel() {
   const { user, setUser } = useAuth();
-  const [form, setForm] = useState({ name: user?.name || '', email: user?.email || '', phone: user?.phone || '' });
+  const [form, setForm] = useState({ name: user?.name || '', phone: user?.phone || '' });
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
 
   async function handleSave(e) {
     e.preventDefault();
+    setError('');
+    if (!form.name.trim()) return setError('Name is required.');
     setSaving(true);
     try {
       // Email lives in Supabase Auth (not the profile table) and changing it
-      // requires a separate re-verification flow — only name/phone are saved here.
-      const updated = await api.patch('/me', { name: form.name, phone: form.phone });
+      // needs a separate re-verification flow — only name/phone save here.
+      const updated = await api.patch('/me', { name: form.name.trim(), phone: form.phone.trim() });
       setUser(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err.message || 'Could not save your profile. Please try again.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handlePhoto(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return setError('Choose an image file.');
+    if (file.size > 3 * 1024 * 1024) return setError('Image must be under 3 MB.');
+    setError('');
+    setUploading(true);
+    try {
+      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      const { error: upErr } = await supabase.storage.from('avatars').upload(path, file, { upsert: true, contentType: file.type });
+      if (upErr) throw upErr;
+      const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+      const updated = await api.patch('/me', { avatar: data.publicUrl });
+      setUser(updated);
+    } catch (err) {
+      setError(err.message || 'Could not upload that photo.');
+    } finally {
+      setUploading(false);
     }
   }
 
   return (
     <Card padding="lg">
       <CardHeader title="Profile" subtitle="Your personal information." />
+      {error && <p className="mb-4 rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
       <div className="mb-6 flex items-center gap-4">
         <Avatar src={user?.avatar} name={user?.name} className="h-16 w-16 rounded-2xl border border-line text-lg" />
-        <Button variant="outline" size="sm">Upload photo</Button>
+        <input ref={fileRef} type="file" accept="image/*" hidden onChange={handlePhoto} />
+        <Button variant="outline" size="sm" disabled={uploading} onClick={() => fileRef.current?.click()}>
+          {uploading ? 'Uploading…' : 'Upload photo'}
+        </Button>
       </div>
       <form onSubmit={handleSave} className="grid gap-4 sm:grid-cols-2">
         <Field label="Full name"><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /></Field>
-        <Field label="Email"><Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} /></Field>
+        <Field label="Email">
+          <Input type="email" value={user?.email || ''} readOnly disabled className="opacity-70" />
+        </Field>
         <Field label="Phone"><Input value={form.phone} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} /></Field>
         <div className="sm:col-span-2 flex items-center gap-3">
           <Button type="submit" disabled={saving}>Save changes</Button>
@@ -397,7 +436,7 @@ function CategoriesPanel() {
                 </div>
                 <div className="flex items-center gap-3">
                   <CategoryBalance category={parent} />
-                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                     <IconButton icon={Plus} size={13} label="Add sub-category" title="Add sub-category" onClick={() => { setEditing(null); setParentForNew(parent.id); setModalOpen(true); }} />
                     <IconButton icon={Pencil} size={13} label="Edit" onClick={() => { setEditing(parent); setParentForNew(null); setModalOpen(true); }} />
                     <IconButton icon={Trash2} size={13} variant="danger" label="Delete" onClick={() => handleDelete(parent)} />
@@ -416,7 +455,7 @@ function CategoriesPanel() {
                       </div>
                       <div className="flex items-center gap-3">
                         <CategoryBalance category={c} />
-                        <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                        <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                           <IconButton icon={Pencil} size={13} label="Edit" onClick={() => { setEditing(c); setModalOpen(true); }} />
                           <IconButton icon={Trash2} size={13} variant="danger" label="Delete" onClick={() => handleDelete(c)} />
                         </div>
@@ -556,7 +595,7 @@ function TemplatesPanel() {
                 <p className="text-sm font-semibold text-fg">{t.name}</p>
                 <p className="text-xs text-subtle capitalize">{t.type} · {formatCurrency(t.amount)}</p>
               </div>
-              <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+              <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                 <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(t); setModalOpen(true); }} />
                 <IconButton icon={Trash2} variant="danger" label="Delete" onClick={() => handleDelete(t.id)} />
               </div>
@@ -570,18 +609,43 @@ function TemplatesPanel() {
 }
 
 // ---------------------------------------------------------------------------
+const NOTIF_DEFAULTS = { email: true, push: true, budgetAlerts: true, billReminders: true };
+
 function NotificationsPanel() {
-  const [prefsLocal, setPrefsLocal] = useState({ email: true, push: true, budgetAlerts: true, billReminders: true });
+  const { user, setUser } = useAuth();
+  const [prefsLocal, setPrefsLocal] = useState({ ...NOTIF_DEFAULTS, ...(user?.reminderSettings || {}) });
+  const [saveState, setSaveState] = useState(''); // '' | 'saving' | 'saved' | 'error'
+
+  async function update(patch) {
+    const next = { ...prefsLocal, ...patch };
+    setPrefsLocal(next);
+    setSaveState('saving');
+    try {
+      const updated = await api.patch('/me', { reminderSettings: next });
+      setUser(updated);
+      setSaveState('saved');
+      setTimeout(() => setSaveState(''), 1500);
+    } catch {
+      setSaveState('error');
+    }
+  }
+
   return (
     <Card padding="lg">
-      <CardHeader title="Delivery preferences" subtitle="Choose how you want to be notified. (Delivery isn't wired up yet — see Future enhancements.)" />
-      <ToggleRow title="Email notifications" checked={prefsLocal.email} onChange={(v) => setPrefsLocal((p) => ({ ...p, email: v }))} />
+      <CardHeader
+        title="Notifications"
+        subtitle="In-app notifications are always on. These control email and push delivery, which is rolling out on the mobile app."
+        right={saveState === 'saving' ? <span className="text-xs text-subtle">Saving…</span>
+          : saveState === 'saved' ? <span className="text-xs text-emerald-500">Saved</span>
+          : saveState === 'error' ? <span className="text-xs text-rose-500">Couldn’t save</span> : null}
+      />
+      <ToggleRow title="Email notifications" checked={prefsLocal.email} onChange={(v) => update({ email: v })} />
       <div className="divider" />
-      <ToggleRow title="Push notifications" checked={prefsLocal.push} onChange={(v) => setPrefsLocal((p) => ({ ...p, push: v }))} />
+      <ToggleRow title="Push notifications" checked={prefsLocal.push} onChange={(v) => update({ push: v })} />
       <div className="divider" />
-      <ToggleRow title="Budget alerts" body="Notify when a budget crosses its alert threshold." checked={prefsLocal.budgetAlerts} onChange={(v) => setPrefsLocal((p) => ({ ...p, budgetAlerts: v }))} />
+      <ToggleRow title="Budget alerts" body="Notify when a budget crosses its alert threshold." checked={prefsLocal.budgetAlerts} onChange={(v) => update({ budgetAlerts: v })} />
       <div className="divider" />
-      <ToggleRow title="Bill reminders" body="Notify a few days before a bill is due." checked={prefsLocal.billReminders} onChange={(v) => setPrefsLocal((p) => ({ ...p, billReminders: v }))} />
+      <ToggleRow title="Bill reminders" body="Notify a few days before a bill is due." checked={prefsLocal.billReminders} onChange={(v) => update({ billReminders: v })} />
     </Card>
   );
 }
@@ -686,9 +750,9 @@ function PasswordModal({ open, onClose }) {
           </p>
           <div className="space-y-3">
             <div>
-              <Input type="password" autoFocus value={password} onChange={(e) => setPasswordValue(e.target.value)} placeholder="New password" />
-              {password.length > 0 && password.length < 6 && (
-                <p className="mt-1 text-xs text-rose-500">At least 6 characters.</p>
+              <Input type="password" autoFocus value={password} onChange={(e) => setPasswordValue(e.target.value)} placeholder="At least 8 characters" />
+              {password.length > 0 && passwordValidationError(password, password) && (
+                <p className="mt-1 text-xs text-rose-500">{passwordValidationError(password, password)}</p>
               )}
             </div>
             <div>
@@ -696,7 +760,7 @@ function PasswordModal({ open, onClose }) {
               {confirm.length > 0 && password !== confirm && (
                 <p className="mt-1 text-xs text-rose-500">Passwords do not match.</p>
               )}
-              {confirm.length > 0 && password === confirm && password.length >= 6 && (
+              {confirm.length > 0 && isPasswordValid(password, confirm) && (
                 <p className="mt-1 text-xs text-emerald-500">Passwords match.</p>
               )}
             </div>
@@ -712,12 +776,162 @@ function PasswordModal({ open, onClose }) {
   );
 }
 
+// Email-OTP two-factor: enable / disable. On enable, the backend also marks
+// this browser's device session verified (it now sends x-session-id), so
+// turning 2FA on never locks the current session out.
+function TwoFactorModal({ open, onClose, enabling, onDone }) {
+  const purpose = enabling ? 'enable' : 'disable';
+  const [step, setStep] = useState('intro'); // intro -> code
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setStep('intro'); setCode(''); setError(''); setBusy(false);
+  }, [open]);
+
+  async function sendCode() {
+    setError(''); setBusy(true);
+    try {
+      await twoFactorApi.sendCode(purpose);
+      setStep('code');
+    } catch (err) {
+      setError(err.message || 'Could not send a verification code.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verify() {
+    if (!/^\d{6}$/.test(code.trim())) return setError('Enter the 6-digit code from your email.');
+    setError(''); setBusy(true);
+    try {
+      await twoFactorApi.verify(purpose, code.trim());
+      onDone(enabling);
+      onClose();
+    } catch (err) {
+      setError(
+        err.message === 'incorrect_code' ? 'That code is not correct.'
+        : err.message === 'code_expired_or_missing' ? 'That code has expired — start again.'
+        : err.message === 'too_many_attempts' ? 'Too many attempts. Wait a few minutes.'
+        : 'Could not verify that code.'
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title={enabling ? 'Enable two-factor authentication' : 'Turn off two-factor authentication'} size="sm">
+      {error && <p className="mb-3 rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
+      {step === 'intro' ? (
+        <>
+          <p className="text-sm text-muted">
+            {enabling
+              ? 'We’ll email you a 6-digit code now. Enter it to turn on 2FA. After that, signing in on a new device will ask for a code.'
+              : 'We’ll email you a 6-digit code to confirm it’s you before turning 2FA off.'}
+          </p>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <Button onClick={sendCode} disabled={busy}>{busy ? 'Sending…' : 'Send code'}</Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mb-3 text-sm text-muted">Enter the 6-digit code we just emailed you.</p>
+          <Input
+            type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} autoFocus
+            value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} placeholder="123456"
+          />
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <Button variant="outline" onClick={() => setStep('intro')}>Back</Button>
+            <Button onClick={verify} disabled={busy || code.trim().length !== 6}>
+              {busy ? 'Verifying…' : enabling ? 'Enable 2FA' : 'Turn off 2FA'}
+            </Button>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function SessionsModal({ open, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState('');
+  const [revoking, setRevoking] = useState('');
+  const currentSid = getWebSessionId();
+
+  async function load() {
+    setError('');
+    try {
+      setRows(await sessionsApi.list());
+    } catch (err) {
+      setError(err.message || 'Could not load your sessions.');
+      setRows([]);
+    }
+  }
+  useEffect(() => { if (open) { setRows(null); load(); } }, [open]);
+
+  async function revoke(id) {
+    setRevoking(id);
+    try {
+      await sessionsApi.revoke(id);
+      await load();
+    } catch (err) {
+      setError(err.message || 'Could not revoke that session.');
+    } finally {
+      setRevoking('');
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Active sessions" subtitle="Devices signed in to your account." size="md">
+      {error && <p className="mb-3 rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{error}</p>}
+      {rows === null ? (
+        <p className="text-sm text-muted">Loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-muted">No other devices are signed in.</p>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((s) => {
+            const isCurrent = s.current || s.sessionId === currentSid;
+            return (
+              <div key={s.id} className="flex items-center justify-between rounded-xl border border-line p-3">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-medium text-fg">
+                    <Monitor size={14} className="shrink-0 text-subtle" />
+                    {s.deviceLabel || s.platform || 'Unknown device'}
+                    {isCurrent && <span className="rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-500">This device</span>}
+                  </p>
+                  <p className="mt-0.5 text-xs text-subtle">
+                    {s.platform || 'web'}
+                    {s.lastSeenAt ? ` · last active ${new Date(s.lastSeenAt).toLocaleString()}` : ''}
+                  </p>
+                </div>
+                {!isCurrent && (
+                  <Button variant="danger" size="sm" disabled={revoking === s.id} onClick={() => revoke(s.id)}>
+                    {revoking === s.id ? 'Revoking…' : 'Revoke'}
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function SecurityPanel() {
   const { user, setUser, logout } = useAuth();
   const { prefs, setPrefs } = usePreferences();
   const [pinModalOpen, setPinModalOpen] = useState(false);
   const [pinSet, setPinSet] = useState(hasPin());
   const [pwModalOpen, setPwModalOpen] = useState(false);
+  const [twoFaModal, setTwoFaModal] = useState(null); // null | 'enable' | 'disable'
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const twoFactorOn = !!user?.twoFactorEnabled;
 
   return (
     <div className="space-y-5">
@@ -737,10 +951,27 @@ function SecurityPanel() {
       </Card>
 
       <Card padding="lg">
-        <CardHeader title="Two-factor & biometrics" />
-        <ToggleRow title="Two-factor authentication" body="Stub — not enforced by the demo backend." checked={!!user?.twoFactorEnabled} onChange={(v) => setUser({ ...user, twoFactorEnabled: v })} />
+        <CardHeader title="Two-factor authentication" subtitle="Require an emailed 6-digit code when signing in on a new device." />
+        <div className="flex items-center justify-between">
+          <p className="flex items-center gap-2 text-sm text-muted">
+            {twoFactorOn ? <Lock size={15} className="text-emerald-500" /> : <Unlock size={15} />}
+            {twoFactorOn ? 'Two-factor authentication is on' : 'Two-factor authentication is off'}
+          </p>
+          <Button
+            variant={twoFactorOn ? 'danger' : 'primary'}
+            size="sm"
+            onClick={() => setTwoFaModal(twoFactorOn ? 'disable' : 'enable')}
+          >
+            {twoFactorOn ? 'Turn off' : 'Enable'}
+          </Button>
+        </div>
         <div className="divider" />
-        <ToggleRow title="Biometric unlock" body="Stub — WebAuthn support is a future enhancement." checked={!!user?.biometricEnabled} onChange={(v) => setUser({ ...user, biometricEnabled: v })} />
+        <div className="flex items-center justify-between py-1">
+          <div>
+            <p className="text-sm font-medium text-fg">Biometric unlock</p>
+            <p className="text-xs text-subtle">Face ID / fingerprint unlock is available in the Vault mobile app.</p>
+          </div>
+        </div>
       </Card>
 
       <Card padding="lg">
@@ -776,7 +1007,7 @@ function SecurityPanel() {
         <div className="divider" />
         <div className="flex items-center justify-between py-2">
           <p className="text-sm text-muted">Active sessions</p>
-          <Button variant="outline" size="sm" onClick={() => alert('Session management is a future enhancement.')}>View</Button>
+          <Button variant="outline" size="sm" onClick={() => setSessionsOpen(true)}>View</Button>
         </div>
         <div className="divider" />
         <div className="flex items-center justify-between py-2">
@@ -787,6 +1018,13 @@ function SecurityPanel() {
 
       <PinModal open={pinModalOpen} onClose={() => setPinModalOpen(false)} mode={pinSet ? 'change' : 'set'} onDone={() => setPinSet(true)} />
       <PasswordModal open={pwModalOpen} onClose={() => setPwModalOpen(false)} />
+      <TwoFactorModal
+        open={!!twoFaModal}
+        enabling={twoFaModal === 'enable'}
+        onClose={() => setTwoFaModal(null)}
+        onDone={(enabled) => setUser({ ...user, twoFactorEnabled: enabled, twoFactorVerified: true })}
+      />
+      <SessionsModal open={sessionsOpen} onClose={() => setSessionsOpen(false)} />
     </div>
   );
 }
@@ -794,48 +1032,117 @@ function SecurityPanel() {
 // ---------------------------------------------------------------------------
 function DataPanel() {
   const [confirmClear, setConfirmClear] = useState(false);
+  const [clearWord, setClearWord] = useState('');
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null); // { tone: 'ok'|'err', text }
+  const importRef = useRef(null);
 
   async function exportJson() {
-    const [accounts, categories, transactions, budgets, bills, goals, debts, templates] = await Promise.all([
-      accountsApi.list(), categoriesApi.list(), transactionsApi.list(), budgetsApi.list(),
-      billsApi.list(), goalsApi.list(), debtsApi.list(), templatesApi.list(),
-    ]);
-    const blob = new Blob(
-      [JSON.stringify({ accounts, categories, transactions, budgets, bills, goals, debts, templates }, null, 2)],
-      { type: 'application/json' }
-    );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `vault-export-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setMsg(null);
+    setBusy('export');
+    try {
+      const snapshot = await dataApi.export();
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vault-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setMsg({ tone: 'err', text: err.message || 'Could not export your data.' });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function handleImport(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setMsg(null);
+    setBusy('import');
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      // Accept either a full export ({ version, data }) or a bare bundle.
+      const snapshot = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+      const res = await dataApi.import(snapshot);
+      setMsg({ tone: 'ok', text: `Restored ${Object.values(res.counts || {}).reduce((a, b) => a + b, 0)} records. Reloading…` });
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      setMsg({
+        tone: 'err',
+        text: err.status === 409
+          ? 'Your account already has data. Use "Clear all data" first, then import.'
+          : err.status === 413
+            ? 'That backup file is too large to import.'
+            : err.name === 'SyntaxError'
+              ? 'That file isn’t a valid Vault export (couldn’t parse the JSON).'
+              : err.message || 'Could not import that file.',
+      });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function doClear() {
+    setBusy('clear');
+    try {
+      await dataApi.reset();
+      setConfirmClear(false);
+      setMsg({ tone: 'ok', text: 'All data cleared. Reloading…' });
+      setTimeout(() => window.location.reload(), 1000);
+    } catch (err) {
+      setMsg({ tone: 'err', text: err.message || 'Could not clear your data.' });
+    } finally {
+      setBusy('');
+    }
   }
 
   return (
     <div className="space-y-5">
+      {msg && (
+        <p className={`rounded-lg px-3 py-2 text-sm ${msg.tone === 'ok' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-rose-500/10 text-rose-500'}`}>
+          {msg.text}
+        </p>
+      )}
       <Card padding="lg">
-        <CardHeader title="Export & import" subtitle="Download or restore a full copy of your data." />
-        <div className="flex gap-3">
-          <Button variant="outline" onClick={exportJson}>Export data (JSON)</Button>
-          <Button variant="outline" onClick={() => alert('Import data is a future enhancement.')}>Import data</Button>
+        <CardHeader title="Export & import" subtitle="Download a full copy of your data, or restore one." />
+        <div className="flex flex-wrap gap-3">
+          <Button variant="outline" disabled={busy === 'export'} onClick={exportJson}>
+            {busy === 'export' ? 'Preparing…' : 'Export data (JSON)'}
+          </Button>
+          <input ref={importRef} type="file" accept="application/json,.json" hidden onChange={handleImport} />
+          <Button variant="outline" leftIcon={<Upload size={14} />} disabled={busy === 'import'} onClick={() => importRef.current?.click()}>
+            {busy === 'import' ? 'Restoring…' : 'Import data'}
+          </Button>
         </div>
+        <p className="mt-3 text-xs text-subtle">
+          Import restores a previous export. It only runs on an empty account — clear your data first if needed.
+        </p>
       </Card>
       <Card padding="lg" className="border-rose-500/30">
         <CardHeader title="Danger zone" />
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted">Permanently erase all accounts, transactions, budgets, bills, goals and debts.</p>
-          <Button variant="danger" onClick={() => setConfirmClear(true)}>Clear all data</Button>
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-muted">Permanently erase all accounts, transactions, budgets, bills, goals and debts. Your account stays; the data is gone.</p>
+          <Button variant="danger" onClick={() => { setClearWord(''); setConfirmClear(true); }}>Clear all data</Button>
         </div>
       </Card>
 
       <Modal open={confirmClear} onClose={() => setConfirmClear(false)} title="Clear all data?" subtitle="This can't be undone." size="sm">
-        <p className="text-sm text-muted">This would permanently erase every account, transaction, budget, bill, goal and debt in your workspace.</p>
+        <p className="text-sm text-muted">
+          This permanently erases every account, transaction, budget, bill, goal and debt in your workspace. Type
+          <span className="font-semibold text-fg"> RESET </span> to confirm.
+        </p>
+        <Input className="mt-3" value={clearWord} onChange={(e) => setClearWord(e.target.value)} placeholder="RESET" />
         <div className="mt-5 grid grid-cols-2 gap-3">
           <Button variant="outline" onClick={() => setConfirmClear(false)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { alert('Clearing data is not enabled in this demo.'); setConfirmClear(false); }}>Clear data</Button>
+          <Button variant="danger" disabled={clearWord.trim() !== 'RESET' || busy === 'clear'} onClick={doClear}>
+            {busy === 'clear' ? 'Clearing…' : 'Clear data'}
+          </Button>
         </div>
       </Modal>
     </div>
@@ -863,25 +1170,37 @@ function FeedbackPanel() {
 }
 
 function HelpPanel() {
+  const navigate = useNavigate();
   const cards = [
-    { title: 'Contact support', body: 'Reach out to our team for help with your account.' },
-    { title: 'Security disclosure', body: 'Report a vulnerability responsibly.' },
-    { title: 'Changelog', body: 'See what shipped recently — §5 of the recreation guide.' },
-    { title: 'Community', body: 'Join discussions with other Vault users.' },
+    { title: 'Contact support', body: 'Send us a message from the feedback form above — we reply in the app.', onClick: null },
+    { title: 'Report a security issue', body: 'Found a vulnerability? Use the feedback form, category “Security”.', onClick: null },
+    { title: 'Your feedback & tickets', body: 'See replies and the status of anything you’ve sent us.', onClick: () => navigate('/app/feedback') },
+    { title: 'Terms & Privacy', body: 'How Vault handles your data, and the terms of use.', href: '/terms' },
   ];
   return (
     <div className="space-y-5">
       <FeedbackPanel />
       <div className="grid gap-4 sm:grid-cols-2">
-        {cards.map((c) => (
-          <Card key={c.title} hover className="flex items-center justify-between">
-            <div>
-              <p className="font-semibold text-fg">{c.title}</p>
-              <p className="mt-1 text-sm text-muted">{c.body}</p>
-            </div>
-            <ChevronRight size={16} className="shrink-0 text-subtle" />
-          </Card>
-        ))}
+        {cards.map((c) => {
+          const interactive = !!c.onClick || !!c.href;
+          const Wrapper = c.href ? 'a' : 'div';
+          return (
+            <Card
+              key={c.title}
+              hover={interactive}
+              as={Wrapper}
+              {...(c.href ? { href: c.href } : {})}
+              {...(c.onClick ? { onClick: c.onClick, role: 'button', tabIndex: 0 } : {})}
+              className={`flex items-center justify-between ${interactive ? 'cursor-pointer' : ''}`}
+            >
+              <div>
+                <p className="font-semibold text-fg">{c.title}</p>
+                <p className="mt-1 text-sm text-muted">{c.body}</p>
+              </div>
+              {interactive && <ChevronRight size={16} className="shrink-0 text-subtle" />}
+            </Card>
+          );
+        })}
       </div>
     </div>
   );

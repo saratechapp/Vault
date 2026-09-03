@@ -198,7 +198,7 @@ export default function Budgets() {
                   <span className="flex h-11 w-11 items-center justify-center rounded-xl" style={{ background: `${b.category?.color || '#6366f1'}22`, color: b.category?.color || '#6366f1' }}>
                     <DynamicIcon name={b.category?.icon || 'Circle'} size={20} />
                   </span>
-                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                     <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(b); setModalOpen(true); }} />
                     <IconButton icon={Trash2} variant="danger" label="Delete" onClick={() => setConfirmDelete(b)} />
                   </div>

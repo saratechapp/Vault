@@ -8,3 +8,5 @@ backend/.data-key
 backend/sampledata.json
 backend/sampledata.json.tmp
 .DS_Store
+browser-automation/.venv/
+browser-automation/__pycache__/

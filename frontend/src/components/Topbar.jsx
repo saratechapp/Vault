@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Bell, Plus, ShieldCheck, ChevronDown } from 'lucide-react';
+import { Bell, Plus, ShieldCheck, ChevronDown, Menu } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useNewTransaction, useTxCreatedListener } from '../context/NewTransactionContext.jsx';
@@ -17,7 +17,7 @@ const TITLES = {
   '/app/transactions': { title: 'Transactions', sub: 'Every rupee, tracked and searchable.' },
   '/app/calendar': { title: 'Calendar', sub: 'Browse your financial history by day, week or month.' },
   '/app/budgets': { title: 'Budgets', sub: 'Stay on track, category by category.' },
-  '/app/bills': { title: 'Recurring & Bills', sub: 'Reminders plus auto-posted subscriptions.' },
+  '/app/bills': { title: 'Recurring & Bills', sub: 'Track due dates and mark bills paid.' },
   '/app/goals': { title: 'Savings goals', sub: 'Small steps, big wins.' },
   '/app/debts': { title: 'Debts', sub: 'Plan your payoff, minimize interest.' },
   '/app/reports': { title: 'Reports', sub: 'Insights on how you actually spend.' },
@@ -48,7 +48,7 @@ function TrialIndicator({ subscription }) {
   return null;
 }
 
-export function Topbar() {
+export function Topbar({ onMenuClick }) {
   const location = useLocation();
   const { user } = useAuth();
   const { open } = useNewTransaction();
@@ -76,13 +76,23 @@ export function Topbar() {
   const bellTitle = unread > 0 ? `${unread} unread notification${unread === 1 ? '' : 's'}` : 'Notifications';
 
   return (
-    <header className="sticky top-0 z-30 flex items-center justify-between border-b border-line bg-app/70 px-8 py-4 backdrop-blur-xl">
-      <div>
-        <p className="text-xs text-subtle">Workspace · / · {title}</p>
-        <h1 className="mt-0.5 font-display text-2xl font-bold text-fg">{title}</h1>
-        {sub && <p className="text-sm text-muted">{sub}</p>}
+    <header className="sticky top-0 z-30 flex items-center justify-between gap-3 border-b border-line bg-app/70 px-4 py-4 backdrop-blur-xl sm:px-8">
+      <div className="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onMenuClick}
+          aria-label="Open navigation"
+          className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-muted transition hover:bg-tint/[0.08] hover:text-fg md:hidden"
+        >
+          <Menu size={20} />
+        </button>
+        <div className="min-w-0">
+          <p className="hidden text-xs text-subtle sm:block">Workspace · / · {title}</p>
+          <h1 className="truncate font-display text-xl font-bold text-fg sm:mt-0.5 sm:text-2xl">{title}</h1>
+          {sub && <p className="hidden text-sm text-muted sm:block">{sub}</p>}
+        </div>
       </div>
-      <div className="flex shrink-0 items-center gap-3">
+      <div className="flex shrink-0 items-center gap-2 sm:gap-3">
         <ThemeToggle />
         <Link
           to="/app/notifications"
@@ -103,9 +113,10 @@ export function Topbar() {
             leftIcon={<Plus size={16} />}
             onClick={accountsLoaded && !hasAccounts ? undefined : open}
             aria-disabled={accountsLoaded && !hasAccounts}
+            aria-label="New transaction"
             className={accountsLoaded && !hasAccounts ? 'opacity-60' : ''}
           >
-            New transaction
+            <span className="hidden sm:inline">New transaction</span>
           </Button>
         </NoAccountsTooltip>
         {user?.isAdmin && (
@@ -123,14 +134,14 @@ export function Topbar() {
           onClick={() => setProfileOpen(true)}
           aria-label="Open profile"
           aria-haspopup="dialog"
-          className="flex items-center gap-2 rounded-xl border border-line bg-tint/[0.05] py-1.5 pl-1.5 pr-2.5 transition hover:bg-tint/[0.08]"
+          className="flex items-center gap-2 rounded-xl border border-line bg-tint/[0.05] p-1.5 transition hover:bg-tint/[0.08] sm:pr-2.5"
         >
           <Avatar src={user?.avatar} name={user?.name} className="h-7 w-7 rounded-lg text-[10px]" />
-          <div className="leading-tight text-left">
+          <div className="hidden leading-tight text-left sm:block">
             <p className="text-xs font-semibold text-fg">{user?.name}</p>
             <p className="truncate text-[10px] text-muted">{user?.email}</p>
           </div>
-          <ChevronDown size={16} className="shrink-0 text-muted" />
+          <ChevronDown size={16} className="hidden shrink-0 text-muted sm:block" />
         </button>
       </div>
       <ProfileDrawer open={profileOpen} onClose={() => setProfileOpen(false)} />

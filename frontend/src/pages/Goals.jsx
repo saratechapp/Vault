@@ -519,7 +519,7 @@ export default function Goals() {
                   <span className="flex h-11 w-11 items-center justify-center rounded-xl" style={{ background: `${g.color}22`, color: g.color }}>
                     <DynamicIcon name={g.icon || 'Target'} size={20} />
                   </span>
-                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                     <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(g); setModalOpen(true); }} />
                     <IconButton icon={Trash2} variant="danger" label="Delete" onClick={() => setConfirmDelete(g)} />
                   </div>

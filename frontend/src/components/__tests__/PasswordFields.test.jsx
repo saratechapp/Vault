@@ -18,23 +18,24 @@ function Harness(props) {
   return <PasswordFields password={password} setPassword={setPassword} confirm={confirm} setConfirm={setConfirm} {...props} />;
 }
 
+const PW_PLACEHOLDER = 'At least 8 characters';
+
 describe('PasswordFields', () => {
   it('shows a length hint once a short password is typed', async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    const passwordInput = screen.getByPlaceholderText('At least 6 characters');
-    await user.type(passwordInput, '123');
+    await user.type(screen.getByPlaceholderText(PW_PLACEHOLDER), '123');
 
-    expect(screen.getByText('At least 6 characters.')).toBeInTheDocument();
+    expect(screen.getByText('Password must be at least 8 characters.')).toBeInTheDocument();
   });
 
   it('shows a mismatch hint when confirm differs from password', async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    await user.type(screen.getByPlaceholderText('At least 6 characters'), 'abcdef');
-    await user.type(screen.getByPlaceholderText('Re-enter password'), 'abcxyz');
+    await user.type(screen.getByPlaceholderText(PW_PLACEHOLDER), 'abcdef12');
+    await user.type(screen.getByPlaceholderText('Re-enter password'), 'abcxyz34');
 
     expect(screen.getByText('Passwords do not match.')).toBeInTheDocument();
     expect(screen.queryByText('Passwords match.')).not.toBeInTheDocument();
@@ -44,10 +45,10 @@ describe('PasswordFields', () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    await user.type(screen.getByPlaceholderText('At least 6 characters'), 'abcdef');
-    await user.type(screen.getByPlaceholderText('Re-enter password'), 'abcdef');
+    await user.type(screen.getByPlaceholderText(PW_PLACEHOLDER), 'abcdef12');
+    await user.type(screen.getByPlaceholderText('Re-enter password'), 'abcdef12');
 
-    expect(screen.queryByText('At least 6 characters.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Password must be at least 8 characters.')).not.toBeInTheDocument();
     expect(screen.queryByText('Passwords do not match.')).not.toBeInTheDocument();
     expect(screen.getByText('Passwords match.')).toBeInTheDocument();
   });
@@ -56,7 +57,7 @@ describe('PasswordFields', () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    await user.type(screen.getByPlaceholderText('At least 6 characters'), 'abcdef');
+    await user.type(screen.getByPlaceholderText(PW_PLACEHOLDER), 'abcdef12');
 
     expect(screen.queryByText('Passwords do not match.')).not.toBeInTheDocument();
     expect(screen.queryByText('Passwords match.')).not.toBeInTheDocument();
@@ -69,13 +70,10 @@ describe('PasswordFields', () => {
 
   it('both fields render as type="password" (no show/hide toggle exists in this component)', () => {
     render(<Harness />);
-    const passwordInput = screen.getByPlaceholderText('At least 6 characters');
+    const passwordInput = screen.getByPlaceholderText(PW_PLACEHOLDER);
     const confirmInput = screen.getByPlaceholderText('Re-enter password');
     expect(passwordInput).toHaveAttribute('type', 'password');
     expect(confirmInput).toHaveAttribute('type', 'password');
-    // No show/hide toggle button is rendered by this component or the
-    // underlying <Input> — see the final report for why the corresponding
-    // task sub-case (toggling type between password/text) was scoped out.
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 });

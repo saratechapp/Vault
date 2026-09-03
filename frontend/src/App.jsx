@@ -16,6 +16,9 @@ import CreatePassword from './pages/CreatePassword.jsx';
 import ForgotPassword from './pages/ForgotPassword.jsx';
 import ResetPassword from './pages/ResetPassword.jsx';
 import ImpersonateEntry from './pages/ImpersonateEntry.jsx';
+import NotFound from './pages/NotFound.jsx';
+import { Terms, Privacy } from './pages/Legal.jsx';
+import TwoFactorChallenge from './pages/TwoFactorChallenge.jsx';
 
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
 const Accounts = lazy(() => import('./pages/Accounts.jsx'));
@@ -41,10 +44,11 @@ function RouteFallback() {
 }
 
 function Protected({ children }) {
-  const { isAuthed, ready, needsPassword } = useAuth();
+  const { isAuthed, ready, needsPassword, twoFactorPending } = useAuth();
   if (!ready) return null;
   if (!isAuthed) return <Navigate to="/login" replace />;
   if (needsPassword) return <Navigate to="/create-password" replace />;
+  if (twoFactorPending) return <Navigate to="/two-factor" replace />;
   return children;
 }
 
@@ -55,9 +59,12 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/create-password" element={<CreatePassword />} />
+      <Route path="/two-factor" element={<TwoFactorChallenge />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/impersonate-entry" element={<ImpersonateEntry />} />
+      <Route path="/terms" element={<Terms />} />
+      <Route path="/privacy" element={<Privacy />} />
 
       <Route
         path="/app"
@@ -82,9 +89,10 @@ function AppRoutes() {
         <Route path="feedback" element={<Suspense fallback={<RouteFallback />}><MyFeedback /></Suspense>} />
         <Route path="settings" element={<Suspense fallback={<RouteFallback />}><Settings /></Suspense>} />
         <Route path="subscription" element={<Suspense fallback={<RouteFallback />}><Subscription /></Suspense>} />
+        <Route path="*" element={<NotFound />} />
       </Route>
 
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<NotFound />} />
     </Routes>
   );
 }

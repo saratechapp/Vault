@@ -13,9 +13,9 @@ const OAUTH_PROVIDERS = [
 ];
 
 const HIGHLIGHTS = [
-  'Free forever — no card, no trial trickery',
-  'Two-way import from any bank statement',
-  'Bank-grade encryption, exports on request',
+  'Free to start — no card required',
+  'CSV import from any bank statement',
+  'Encrypted at rest and in transit · export anytime',
   "Beautiful dashboards you'll want to open",
 ];
 
@@ -78,10 +78,14 @@ export default function Signup() {
   async function handleSendCode(e) {
     e.preventDefault();
     setError('');
-    if (!email.trim()) return;
+    const trimmed = email.trim();
+    if (!trimmed) return setError('Enter your email address.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      return setError('That doesn’t look like a valid email address.');
+    }
     setBusy(true);
     try {
-      await startEmailSignup(email.trim());
+      await startEmailSignup(trimmed);
       setStep('verify');
       setCode('');
       setResendIn(RESEND_COOLDOWN);
@@ -129,7 +133,7 @@ export default function Signup() {
           <span className="font-display text-lg font-bold">Vault</span>
         </div>
         <div className="relative">
-          <h2 className="font-display text-4xl font-bold leading-tight">Join 40,000+ people<br />building financial calm.</h2>
+          <h2 className="font-display text-4xl font-bold leading-tight">Start building<br />financial calm.</h2>
           <Stagger as="ul" className="mt-6 space-y-3" viewport={false}>
             {HIGHLIGHTS.map((h) => (
               <StaggerItem key={h} as="li" className="flex items-start gap-2.5 text-white/90">
@@ -169,10 +173,10 @@ export default function Signup() {
 
               {error && <p className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>}
 
-              <form onSubmit={handleSendCode} className="mt-6 space-y-4">
+              <form onSubmit={handleSendCode} noValidate className="mt-6 space-y-4">
                 <Field label="Email">
                   <Input
-                    leftIcon={<Mail size={15} />} type="email" required autoFocus
+                    leftIcon={<Mail size={15} />} type="email" autoFocus
                     value={email} onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@company.com"
                   />
@@ -204,7 +208,7 @@ export default function Signup() {
               </div>
 
               <p className="mt-8 text-center text-xs text-subtle">
-                By continuing you agree to Vault's <a href="#terms" className="link-underline text-muted hover:text-fg">Terms</a> and <a href="#privacy" className="link-underline text-muted hover:text-fg">Privacy Policy</a>.
+                By continuing you agree to Vault's <Link to="/terms" className="link-underline text-muted hover:text-fg">Terms</Link> and <Link to="/privacy" className="link-underline text-muted hover:text-fg">Privacy Policy</Link>.
               </p>
             </>
           ) : (
@@ -223,11 +227,11 @@ export default function Signup() {
 
               {error && <p className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>}
 
-              <form onSubmit={handleVerify} className="mt-6 space-y-4">
+              <form onSubmit={handleVerify} noValidate className="mt-6 space-y-4">
                 <Field label="Verification code">
                   <Input
                     type="text" inputMode="numeric" autoComplete="one-time-code"
-                    maxLength={CODE_MAX_LENGTH} required autoFocus
+                    maxLength={CODE_MAX_LENGTH} autoFocus
                     value={code}
                     onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
                     placeholder="12345678"

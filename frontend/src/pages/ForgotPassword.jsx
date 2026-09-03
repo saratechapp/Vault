@@ -15,9 +15,13 @@ export default function ForgotPassword() {
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
+    const trimmed = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      return setError('Enter a valid email address.');
+    }
     setSubmitting(true);
     try {
-      await sendPasswordReset(email.trim());
+      await sendPasswordReset(trimmed);
       setSent(true);
     } catch (err) {
       setError(err.message || 'Could not send the reset link.');
@@ -51,9 +55,9 @@ export default function ForgotPassword() {
 
             {error && <p className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>}
 
-            <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+            <form onSubmit={handleSubmit} noValidate className="mt-6 space-y-4">
               <Field label="Email">
-                <Input leftIcon={<Mail size={15} />} type="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+                <Input leftIcon={<Mail size={15} />} type="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
               </Field>
               <Button type="submit" fullWidth disabled={submitting}>{submitting ? 'Sending…' : 'Send reset link'}</Button>
             </form>

@@ -289,7 +289,7 @@ export default function Debts() {
                     <p className="font-display text-base font-semibold text-fg">{d.name}</p>
                     <p className="text-xs text-subtle">{d.creditor}</p>
                   </div>
-                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                  <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                     <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(d); setModalOpen(true); }} />
                     <IconButton icon={Trash2} variant="danger" label="Delete" onClick={() => setConfirmDelete(d)} />
                   </div>

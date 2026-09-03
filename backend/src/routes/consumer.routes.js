@@ -15,7 +15,7 @@ const db = require('../db');
 const adminDb = require('../adminDb');
 const { parseDevice } = require('../lib/deviceParser');
 const plans = require('../plans');
-const { API_VERSION, isDevEnv } = require('../config/env');
+const { API_VERSION, isDevEnv, SUPABASE_HOST } = require('../config/env');
 const { ah } = require('../lib/asyncHandler');
 const { runExclusive } = require('../lib/userMutex');
 const { requireAuth } = require('../middleware/requireAuth');
@@ -29,7 +29,7 @@ const { sendJSON, bumpCache } = require('../lib/httpCache');
 const { buildSafeUser } = require('../lib/safeUser');
 const { countryFromHeaders } = require('../lib/geoIp');
 const { ownsAccount, foreignAccountField } = require('../lib/ownership');
-const { isValidDateStr, emptyToNull, advanceDate } = require('../lib/validation');
+const { isValidDateStr, emptyToNull, advanceDate, boundedNumber, cleanEntityText } = require('../lib/validation');
 const {
   iso, sortTransactionsRecentFirst, addDaysFromToday, round1, numOr, signAmount,
   categoryIdByName, startOfWeek, budgetWindow, budgetTransactionsInWindow,
@@ -62,6 +62,20 @@ const insightsCache = require('../services/cache');
 
 const router = express.Router();
 
+// Input hardening for every write: trim + strip control characters + cap the
+// length of known free-text/label fields on the request body, in place, so
+// the individual handlers downstream receive already-bounded values. Numeric
+// / required / positivity checks stay per-route (each entity has its own
+// rules). `cleanEntityText` only touches a fixed set of known keys
+// (name/vendor/note/labels/…), so routes that don't use them (2FA, feedback's
+// own slice-capped subject/message, billing, dashboard-layout) are unaffected.
+router.use((req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    cleanEntityText(req.body);
+  }
+  next();
+});
+
 // ---------------------------------------------------------------------------
 // Offline-first mobile sync helpers, shared by the entity POST/PATCH routes.
 // All no-ops for a request that doesn't opt in (no `id` / no `baseUpdatedAt`
@@ -76,6 +90,26 @@ const CLIENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 function clientId(req) {
   const id = req.body && req.body.id;
   return typeof id === 'string' && CLIENT_UUID_RE.test(id) ? id : null;
+}
+
+// An avatar URL must be https and on a known host: the project's Supabase
+// Storage host (a genuine upload), api.dicebear.com (generated default
+// avatars), or the identity-provider CDNs OAuth sign-in returns a photo from.
+// Blocks pointing a profile image at an arbitrary attacker-controlled domain
+// (tracking pixel / SSRF-by-proxy if any consumer fetches it server-side)
+// without breaking existing OAuth avatars.
+const SUPABASE_URL_HOST = (() => {
+  try { return SUPABASE_HOST ? new URL(SUPABASE_HOST).host : null; } catch { return null; }
+})();
+const AVATAR_ALLOWED_HOSTS = ['api.dicebear.com', 'gravatar.com', 'www.gravatar.com', SUPABASE_URL_HOST].filter(Boolean);
+const AVATAR_ALLOWED_HOST_SUFFIXES = ['.googleusercontent.com', '.fbcdn.net', '.supabase.co', '.supabase.in'];
+function isAllowedAvatarUrl(value) {
+  if (typeof value !== 'string' || value.length > 2000) return false;
+  let u;
+  try { u = new URL(value); } catch { return false; }
+  if (u.protocol !== 'https:') return false;
+  return AVATAR_ALLOWED_HOSTS.includes(u.host)
+    || AVATAR_ALLOWED_HOST_SUFFIXES.some((s) => u.host === s.slice(1) || u.host.endsWith(s));
 }
 
 // True (and sends 409) when the caller's optimistic `baseUpdatedAt` is older
@@ -398,10 +432,14 @@ router.patch('/api/me', requireAuth, ah(async (req, res) => {
   // Public URL of an object the client already uploaded to the `avatars`
   // Storage bucket under its own user-id folder (see
   // supabase/migrations/0015_avatar_storage.sql) — this endpoint only ever
-  // records the resulting URL, it doesn't handle the upload itself.
+  // records the resulting URL, it doesn't handle the upload itself. Restricted
+  // to https on the Supabase Storage host (real uploads) or the DiceBear
+  // service used for generated default avatars, so a caller can't point their
+  // profile image at an arbitrary attacker-controlled URL (tracking pixel /
+  // SSRF-by-proxy if any consumer ever fetches it server-side).
   if (body.avatar !== undefined) {
-    if (typeof body.avatar !== 'string' || body.avatar.length > 2000) {
-      return res.status(400).json({ error: 'avatar must be a URL string' });
+    if (body.avatar !== '' && !isAllowedAvatarUrl(body.avatar)) {
+      return res.status(400).json({ error: 'avatar must be an https URL on the app storage or default-avatar host' });
     }
     patch.avatar = body.avatar;
   }
@@ -644,8 +682,18 @@ router.delete('/api/sessions/:id', requireAuth, ah(async (req, res) => {
 // Reuses the previously-unenforced profiles.two_factor_enabled column.
 const TWO_FACTOR_CODE_TTL_MS = 10 * 60 * 1000;
 const TWO_FACTOR_MAX_ATTEMPTS = 5;
+// Keyed HMAC (not a bare digest) so a leaked `two_factor_codes` table can't
+// be brute-forced offline against the 10^6 code space without also having the
+// server secret. Falls back to the service-role key (always present,
+// server-only, high-entropy) when a dedicated TWO_FACTOR_SECRET isn't set.
+const TWO_FACTOR_SECRET = process.env.TWO_FACTOR_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'two-factor-dev-secret';
 function hashTwoFactorCode(code) {
-  return crypto.createHash('sha256').update(code).digest('hex');
+  return crypto.createHmac('sha256', TWO_FACTOR_SECRET).update(code).digest('hex');
+}
+// Constant-time compare of two hex digests of equal length.
+function timingSafeHexEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 function generateTwoFactorCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
@@ -693,7 +741,7 @@ router.post('/api/2fa/verify', requireAuth, twoFactorLimiter, ah(async (req, res
   if (active.attempts >= TWO_FACTOR_MAX_ATTEMPTS) {
     return res.status(429).json({ error: 'too_many_attempts' });
   }
-  if (active.codeHash !== hashTwoFactorCode(code)) {
+  if (!timingSafeHexEqual(active.codeHash, hashTwoFactorCode(code))) {
     await db.incrementTwoFactorAttempts(active.id);
     return res.status(400).json({ error: 'incorrect_code' });
   }
@@ -859,6 +907,9 @@ router.get('/api/accounts', requireAuth, (req, res) => sendJSON(req, res, comput
 router.post('/api/accounts', requireAuth, ah(async (req, res) => {
   const { name, type, openingBalance, color, icon, currency, institution, isPrimary } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
+  if (openingBalance !== undefined && openingBalance !== null && openingBalance !== '' && boundedNumber(openingBalance) === null) {
+    return res.status(400).json({ error: 'openingBalance must be a number' });
+  }
   const id = clientId(req);
   const knownId = id && req.userData.accounts.some((a) => a.id === id);
   if (!knownId && !assertUnderLimit(req, res, 'accounts', req.userData.accounts.length)) return;
@@ -870,7 +921,7 @@ router.post('/api/accounts', requireAuth, ah(async (req, res) => {
     await db.unsetOtherPrimaryAccounts(req.userId);
     req.userData.accounts.forEach((a) => { a.isPrimary = false; });
   }
-  const acc = await db.upsertAccount(req.userId, { id: id || undefined, name, type: type || 'bank', openingBalance: numOr(openingBalance), color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '', isPrimary: makePrimary });
+  const acc = await db.upsertAccount(req.userId, { id: id || undefined, name, type: type || 'bank', openingBalance: boundedNumber(openingBalance) ?? 0, color: color || '#6366f1', icon: icon || 'Landmark', currency: currency || 'INR', institution: institution || '', isPrimary: makePrimary });
   mergeIntoBundle(req.userData.accounts, acc);
   bumpCache(req.userId);
   res.status(201).json(computeAccounts(req.userData).find((a) => a.id === acc.id));
@@ -886,10 +937,13 @@ router.patch('/api/accounts/:id', requireAuth, ah(async (req, res) => {
   if (req.body.isPrimary === false && acc.isPrimary) {
     return res.status(400).json({ error: 'must_have_primary', message: 'Set another account as primary instead of unsetting this one.' });
   }
+  if (req.body.openingBalance !== undefined && boundedNumber(req.body.openingBalance) === null) {
+    return res.status(400).json({ error: 'openingBalance must be a number' });
+  }
   const patch = {};
   ['name', 'type', 'openingBalance', 'color', 'icon', 'currency', 'institution', 'isPrimary'].forEach((f) => {
     if (req.body[f] === undefined) return;
-    patch[f] = f === 'openingBalance' ? Number(req.body[f]) : f === 'isPrimary' ? !!req.body[f] : req.body[f];
+    patch[f] = f === 'openingBalance' ? boundedNumber(req.body[f]) : f === 'isPrimary' ? !!req.body[f] : req.body[f];
   });
   if (patch.isPrimary === true && !acc.isPrimary) {
     await db.unsetOtherPrimaryAccounts(req.userId, acc.id);
@@ -935,7 +989,8 @@ router.delete('/api/accounts/:id', requireAuth, ah(async (req, res) => {
 // emptyToNull so a cleared "— None —" selection can't hit the same crash.
 function buildTransactionFromBody(body, existing, categories = []) {
   const type = body.type || existing?.type || 'expense';
-  const amount = signAmount(type, body.amount !== undefined ? body.amount : existing?.amount);
+  const rawAmount = body.amount !== undefined ? body.amount : existing?.amount;
+  const amount = signAmount(type, boundedNumber(rawAmount) ?? 0);
   const categoryId = type === 'transfer'
     ? categoryIdByName(categories, 'Transfer')
     : emptyToNull(body.categoryId !== undefined ? body.categoryId : existing?.categoryId || null);
@@ -1005,8 +1060,19 @@ const UUID_FK_FIELDS = new Set(['categoryId', 'accountId', 'fromAccountId', 'toA
 
 router.post('/api/transactions', requireAuth, ah(async (req, res) => {
   const body = { ...(req.body || {}) };
+  if (body.amount !== undefined && boundedNumber(body.amount) === null) {
+    return res.status(400).json({ error: 'amount must be a number' });
+  }
   if (!body.accountId && !body.fromAccountId && (body.type || 'expense') !== 'transfer' && req.userData.accounts[0]) {
     body.accountId = req.userData.accounts[0].id;
+  }
+  // A non-transfer transaction needs an account. Only enforced once the user
+  // actually has one to pick (a zero-account bootstrap write is still allowed
+  // — the web app's AccountsGate prevents it, and the offline-sync clients
+  // rely on the lenient path); this just stops the "has accounts but picked
+  // none" case that produces a transaction visible in no ledger.
+  if ((body.type || 'expense') !== 'transfer' && !body.accountId && req.userData.accounts.length > 0) {
+    return res.status(400).json({ error: 'accountId is required' });
   }
   const badField = foreignAccountField(req.userData, body, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
@@ -1027,6 +1093,9 @@ router.patch('/api/transactions/:id', requireAuth, ah(async (req, res) => {
   const existing = req.userData.transactions[idx];
   if (isStaleWrite(req, res, existing)) return;
   const body = req.body || {};
+  if (body.amount !== undefined && boundedNumber(body.amount) === null) {
+    return res.status(400).json({ error: 'amount must be a number' });
+  }
   const badField = foreignAccountField(req.userData, body, ACCOUNT_FIELDS);
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
   const updated = buildTransactionFromBody(body, existing, req.userData.categories);
@@ -1098,10 +1167,12 @@ router.get('/api/budgets', requireAuth, (req, res) => {
 router.post('/api/budgets', requireAuth, ah(async (req, res) => {
   const { categoryId, limit, period, alertAt, startDate, endDate } = req.body || {};
   if (!categoryId || !limit) return res.status(400).json({ error: 'categoryId and limit are required' });
+  const limitNum = boundedNumber(limit, { min: 0 });
+  if (limitNum === null || limitNum <= 0) return res.status(400).json({ error: 'limit must be a positive number' });
   const id = clientId(req);
   const knownId = id && req.userData.budgets.some((x) => x.id === id);
   if (!knownId && !assertUnderLimit(req, res, 'budgets', req.userData.budgets.length)) return;
-  const budget = await db.upsertBudget(req.userId, { id: id || undefined, categoryId, limit: Number(limit), period: period || 'monthly', alertAt: alertAt !== undefined ? Number(alertAt) : 80, startDate: startDate || null, endDate: endDate || null });
+  const budget = await db.upsertBudget(req.userId, { id: id || undefined, categoryId, limit: limitNum, period: period || 'monthly', alertAt: alertAt !== undefined ? (boundedNumber(alertAt, { min: 0, max: 100 }) ?? 80) : 80, startDate: startDate || null, endDate: endDate || null });
   mergeIntoBundle(req.userData.budgets, budget);
   bumpCache(req.userId);
   res.status(201).json(budget);
@@ -1111,9 +1182,16 @@ router.patch('/api/budgets/:id', requireAuth, ah(async (req, res) => {
   const b = req.userData.budgets.find((x) => x.id === req.params.id);
   if (!b) return res.status(404).json({ error: 'not found' });
   if (isStaleWrite(req, res, b)) return;
+  if (req.body.limit !== undefined) {
+    const l = boundedNumber(req.body.limit, { min: 0 });
+    if (l === null || l <= 0) return res.status(400).json({ error: 'limit must be a positive number' });
+  }
   const patch = {};
   ['categoryId', 'limit', 'period', 'alertAt', 'startDate', 'endDate'].forEach((f) => {
-    if (req.body[f] !== undefined) patch[f] = f === 'limit' || f === 'alertAt' ? Number(req.body[f]) : req.body[f];
+    if (req.body[f] === undefined) return;
+    if (f === 'limit') patch[f] = boundedNumber(req.body[f], { min: 0 });
+    else if (f === 'alertAt') patch[f] = boundedNumber(req.body[f], { min: 0, max: 100 }) ?? 80;
+    else patch[f] = req.body[f];
   });
   Object.assign(b, patch);
   if (Object.keys(patch).length) await db.updateBudget(req.userId, b.id, patch);
@@ -1142,6 +1220,7 @@ router.get('/api/bills', requireAuth, (req, res) => {
 router.post('/api/bills', requireAuth, ah(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.amount || !b.dueDate) return res.status(400).json({ error: 'name, amount and dueDate are required' });
+  if (boundedNumber(b.amount) === null) return res.status(400).json({ error: 'amount must be a number' });
   if (!isValidDateStr(b.dueDate)) return res.status(400).json({ error: 'dueDate must be a valid date' });
   const type = b.type || 'expense';
   if (type === 'transfer') {
@@ -1152,7 +1231,7 @@ router.post('/api/bills', requireAuth, ah(async (req, res) => {
   if (badField) return res.status(400).json({ error: `${badField} must reference one of your own accounts` });
   const frequency = b.frequency || 'monthly';
   const bill = await db.insertBill(req.userId, {
-    name: b.name, type, amount: Number(b.amount),
+    name: b.name, type, amount: boundedNumber(b.amount) ?? 0,
     dueDate: b.dueDate, frequency, status: b.status || 'pending',
     // A transfer bill defaults to the generic "Transfer" category, but a
     // caller-supplied categoryId wins — e.g. a bill paid by moving money to
@@ -1178,6 +1257,9 @@ router.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
   const body = req.body || {};
   if (body.dueDate !== undefined && !isValidDateStr(body.dueDate)) {
     return res.status(400).json({ error: 'dueDate must be a valid date' });
+  }
+  if (body.amount !== undefined && boundedNumber(body.amount) === null) {
+    return res.status(400).json({ error: 'amount must be a number' });
   }
   const nextType = body.type !== undefined ? body.type : bill.type;
   const nextFromAccountId = body.fromAccountId !== undefined ? body.fromAccountId : bill.fromAccountId;
@@ -1207,7 +1289,7 @@ router.patch('/api/bills/:id', requireAuth, ah(async (req, res) => {
   ['name', 'type', 'amount', 'dueDate', 'frequency', 'status', 'category', 'categoryId', 'vendor', 'paymentMethod', 'note', 'labels', 'active', 'accountId', 'fromAccountId', 'toAccountId'].forEach((f) => {
     if (body[f] !== undefined) {
       let value = body[f];
-      if (f === 'amount') value = Number(value);
+      if (f === 'amount') value = boundedNumber(value) ?? 0;
       else if (UUID_FK_FIELDS.has(f)) value = emptyToNull(value);
       patch[f] = value;
       bill[f] = value;
@@ -1435,7 +1517,9 @@ router.get('/api/debts', requireAuth, (req, res) => sendJSON(req, res, req.userD
 router.post('/api/debts', requireAuth, ah(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !(b.balance > 0)) return res.status(400).json({ error: 'name and balance are required' });
-  const debt = await db.insertDebt(req.userId, { name: b.name, creditor: b.creditor || '', balance: Number(b.balance), apr: numOr(b.apr), minPayment: numOr(b.minPayment), dueDate: b.dueDate || null });
+  const balanceNum = boundedNumber(b.balance, { min: 0 });
+  if (balanceNum === null || balanceNum <= 0) return res.status(400).json({ error: 'balance must be a positive number' });
+  const debt = await db.insertDebt(req.userId, { name: b.name, creditor: b.creditor || '', balance: balanceNum, apr: boundedNumber(b.apr, { min: 0, max: 1000 }) ?? 0, minPayment: boundedNumber(b.minPayment, { min: 0 }) ?? 0, dueDate: b.dueDate || null });
   req.userData.debts.push(debt);
   bumpCache(req.userId);
   res.status(201).json(debt);

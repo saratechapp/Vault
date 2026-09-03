@@ -7,8 +7,8 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { peekSessionExpiredFlag, clearSessionExpiredFlag, peekAccountSuspendedFlag, clearAccountSuspendedFlag } from '../lib/idleSession.js';
 
 const HIGHLIGHTS = [
-  { icon: TrendingUp, title: 'Up 12.4% this month', body: 'Your net worth is trending up.' },
-  { icon: Sparkles, title: '3 new insights waiting', body: 'AI found ways to save $240.' },
+  { icon: TrendingUp, title: 'Cash flow, clearly', body: 'Income, spend and savings across every account.' },
+  { icon: Sparkles, title: 'Insights from your data', body: 'Trends, anomalies and budget pace — computed live.' },
   { icon: ShieldCheck, title: 'Encrypted & private', body: 'Only you can see your finances.' },
 ];
 
@@ -37,10 +37,17 @@ export default function Login() {
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      return setError('Enter your email and password.');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      return setError('That doesn’t look like a valid email address.');
+    }
     setSubmitting(true);
     try {
       setRememberMe(keepSignedIn);
-      await loginWithPassword(email.trim(), password);
+      await loginWithPassword(trimmedEmail, password);
       // A successful password login is itself proof this account has a
       // working password — go straight to the dashboard rather than relying
       // on the needsPassword effect above, which derives from Supabase's
@@ -85,7 +92,7 @@ export default function Login() {
           </div>
         </div>
 
-        <p className="relative text-sm italic text-white/60">"Vault made me feel like I finally had a CFO for my own money." — Priya M.</p>
+        <p className="relative text-sm italic text-white/60">Track every dollar, hit every goal, and finally understand where your money goes.</p>
       </SlideIn>
 
       <div className="flex flex-col justify-center px-6 py-12 sm:px-12 lg:px-16">
@@ -110,9 +117,9 @@ export default function Login() {
           )}
           {error && <p className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>}
 
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <form onSubmit={handleSubmit} noValidate className="mt-6 space-y-4">
             <Field label="Email">
-              <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+              <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
             </Field>
             <div>
               <div className="mb-1.5 flex items-center justify-between">
@@ -140,7 +147,7 @@ export default function Login() {
           </form>
 
           <p className="mt-8 text-center text-xs text-subtle">
-            By continuing you agree to Vault's <a href="#terms" className="link-underline text-muted hover:text-fg">Terms</a> and <a href="#privacy" className="link-underline text-muted hover:text-fg">Privacy Policy</a>.
+            By continuing you agree to Vault's <Link to="/terms" className="link-underline text-muted hover:text-fg">Terms</Link> and <Link to="/privacy" className="link-underline text-muted hover:text-fg">Privacy Policy</Link>.
           </p>
         </SlideUp>
       </div>

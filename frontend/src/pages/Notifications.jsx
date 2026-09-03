@@ -132,7 +132,7 @@ export default function Notifications() {
                     )}
                   </div>
                 </div>
-                <div className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
+                <div className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                   {!n.read && (
                     <IconButton icon={CheckCheck} label="Mark as read" title="Mark as read" onClick={() => markRead(n)} />
                   )}

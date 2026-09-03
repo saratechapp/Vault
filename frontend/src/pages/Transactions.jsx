@@ -346,7 +346,7 @@ export default function Transactions() {
                         {stmt.currentBalance == null ? '—' : formatCurrency(stmt.currentBalance)}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex justify-end gap-1 opacity-0 transition group-hover:opacity-100">
+                        <div className="flex justify-end gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                           <IconButton icon={Pencil} label="Edit" onClick={() => openForEdit(t)} />
                           <IconButton icon={Trash2} variant="danger" label="Delete" onClick={() => setConfirmDelete(t)} />
                         </div>

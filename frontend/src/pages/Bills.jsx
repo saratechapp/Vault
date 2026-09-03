@@ -333,7 +333,7 @@ function BillCard({ bill, accounts, onMarkPaid, onMarkPending, onEdit, onDelete 
             Mark as paid
           </Button>
         )}
-        <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
+        <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
           <IconButton icon={Pencil} label="Edit bill" title="Edit bill" onClick={() => onEdit(bill)} />
           <IconButton icon={Trash2} variant="danger" label="Delete bill" title="Delete bill" onClick={() => onDelete(bill)} />
         </div>

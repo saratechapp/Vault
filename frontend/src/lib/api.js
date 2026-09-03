@@ -1,6 +1,7 @@
 import { readPrefs, getCurrencyMeta } from './preferences.js';
 import { supabase } from './supabaseClient.js';
 import { touchActivity, clearActivity, isIdleExpired, markSessionExpired, markAccountSuspended } from './idleSession.js';
+import { getWebSessionId } from './deviceSession.js';
 
 async function getToken() {
   const { data } = await supabase.auth.getSession();
@@ -30,6 +31,13 @@ async function request(path, options = {}) {
 
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
+  // Stable per-browser id so the backend's per-device session list and the
+  // email-OTP 2FA step-up gate (previously mobile-only, keyed on this header)
+  // also work on the web.
+  if (token) {
+    const sid = getWebSessionId();
+    if (sid) headers['x-session-id'] = sid;
+  }
 
   const res = await fetch(`/api${path}`, { ...options, headers });
 
@@ -51,6 +59,14 @@ async function request(path, options = {}) {
     if (res.status === 403 && body.error === 'account_suspended') {
       markAccountSuspended();
       await forceSignOutToLogin();
+    }
+    // A 2FA-enabled account whose current session hasn't passed the OTP
+    // step-up: the backend returns a distinct 403 (not 401) on purpose so it
+    // isn't force-signed-out. Bounce to the challenge screen to enter a code.
+    if (res.status === 403 && body.error === 'two_factor_required') {
+      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/two-factor')) {
+        window.location.href = '/two-factor';
+      }
     }
     const err = new Error(body.error || `Request failed (${res.status})`);
     err.status = res.status;
@@ -175,6 +191,19 @@ export const subscriptionApi = {
   setCurrency: (currency) => api.patch('/subscription/currency', { currency }),
 };
 
+// ---- recurring billing (Stripe / Razorpay) ----
+// config: which provider + publishable id the client should init with.
+// subscribe: create the provider subscription for a cycle; the response
+// carries either a Razorpay hosted-checkout `shortUrl` (redirect the browser
+// to it) or Stripe PaymentSheet fields.
+export const billingApi = {
+  config: () => api.get('/billing/config'),
+  subscribe: (billingCycle) => api.post('/billing/subscribe', { billingCycle }),
+  verify: (payload) => api.post('/billing/verify', payload),
+  cancel: () => api.post('/billing/cancel'),
+  resume: () => api.post('/billing/resume'),
+};
+
 // ---- AI insights ----
 export const aiApi = {
   insights: () => api.get('/ai/insights'),
@@ -197,6 +226,26 @@ export const assistantApi = {
 export const dashboardLayoutApi = {
   get: () => api.get('/dashboard-layout'),
   save: (payload) => api.put('/dashboard-layout', payload),
+};
+
+// ---- device sessions (Settings > Security > Active sessions) ----
+export const sessionsApi = {
+  list: () => api.get('/sessions'),
+  revoke: (id) => api.delete(`/sessions/${id}`),
+};
+
+// ---- email-OTP two-factor authentication (Settings > Security) ----
+// purpose: 'enable' | 'disable' | 'login'
+export const twoFactorApi = {
+  sendCode: (purpose) => api.post('/2fa/send-code', { purpose }),
+  verify: (purpose, code) => api.post('/2fa/verify', { purpose, code }),
+};
+
+// ---- data: full backup restore + irreversible reset (Settings > Data) ----
+export const dataApi = {
+  export: () => api.get('/export'),
+  import: (snapshot) => api.post('/import', { data: snapshot }),
+  reset: () => api.post('/me/reset-data'),
 };
 
 // ---- formatting ----

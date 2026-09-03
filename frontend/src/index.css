@@ -178,3 +178,13 @@
     font-variant-numeric: tabular-nums;
   }
 }
+
+/* Row/card action buttons are revealed on hover (`group-hover:opacity-100`)
+   and on keyboard focus (`group-focus-within:opacity-100`). On touch devices
+   there is no hover, so force them permanently visible there — otherwise
+   Edit/Delete are unreachable on a phone or tablet. */
+@media (hover: none), (pointer: coarse) {
+  .group .group-hover\:opacity-100 {
+    opacity: 1 !important;
+  }
+}

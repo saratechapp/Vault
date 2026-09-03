@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, Sparkles, ShieldCheck, Clock } from 'lucide-react';
 import { Card, Alert, Button, Skeleton, Select } from '../components/ui/index.js';
-import { subscriptionApi } from '../lib/api.js';
+import { subscriptionApi, billingApi } from '../lib/api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import {
   SUBSCRIPTION_STATUS,
@@ -29,9 +29,42 @@ export default function Subscription() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [switching, setSwitching] = useState(false);
-  const [cta, setCta] = useState('');
+  const [checkoutCycle, setCheckoutCycle] = useState('');
+  const [checkoutNote, setCheckoutNote] = useState(null); // { tone, text }
 
   const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+
+  async function startCheckout(cycle) {
+    setCheckoutNote(null);
+    setCheckoutCycle(cycle);
+    try {
+      const out = await billingApi.subscribe(cycle);
+      // Razorpay returns a hosted checkout page — send the browser there.
+      if (out.shortUrl) {
+        window.location.assign(out.shortUrl);
+        return;
+      }
+      // Stripe returns PaymentSheet fields (clientSecret). Web card entry via
+      // Stripe Elements isn't built here yet — the mobile app completes it.
+      setCheckoutNote({
+        tone: 'info',
+        text: 'Your subscription is set up. Card details are collected in the Vault mobile app — open it and go to Subscription to finish. The webhook keeps both in sync.',
+      });
+    } catch (err) {
+      setCheckoutNote({
+        tone: 'danger',
+        text: err.message === 'provider_not_configured'
+          ? 'Paid plans aren’t available for your region yet. Your access is unaffected.'
+          : err.message === 'pricing_not_configured' || err.message === 'provider_plan_not_configured'
+            ? 'Pricing hasn’t been finalised yet. Your access is unaffected — check back soon.'
+            : err.message === 'billing_currency_unsupported'
+              ? 'This plan isn’t available in the selected currency. Try another currency above.'
+              : err.message || 'Could not start checkout. Please try again.',
+      });
+    } finally {
+      setCheckoutCycle('');
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -201,8 +234,9 @@ export default function Subscription() {
               price={selected.monthlyFormatted}
               per="per month"
               features={MONTHLY_FEATURES}
-              cta="Subscribe monthly"
-              onCta={() => setCta('monthly')}
+              cta={checkoutCycle === 'monthly' ? 'Starting…' : 'Subscribe monthly'}
+              onCta={() => startCheckout('monthly')}
+              disabled={!!checkoutCycle}
             />
             <PlanCard
               highlight
@@ -216,17 +250,17 @@ export default function Subscription() {
                   : `≈ ${selected.yearlyEquivalentMonthlyFormatted}/mo`
               }
               features={YEARLY_FEATURES}
-              cta="Subscribe yearly"
-              onCta={() => setCta('yearly')}
+              cta={checkoutCycle === 'yearly' ? 'Starting…' : 'Subscribe yearly'}
+              onCta={() => startCheckout('yearly')}
+              disabled={!!checkoutCycle}
             />
           </>
         )}
       </div>
 
-      {cta && (
-        <Alert tone="info" title="Billing is coming soon" className="mt-5">
-          Paid subscriptions aren’t live yet, so the {cta} plan can’t be purchased right now.
-          Your access is unaffected — we’ll enable checkout here when it’s ready.
+      {checkoutNote && (
+        <Alert tone={checkoutNote.tone} title={checkoutNote.tone === 'danger' ? 'Checkout unavailable' : 'Almost there'} className="mt-5">
+          {checkoutNote.text}
         </Alert>
       )}
 
@@ -334,7 +368,7 @@ function FreePlanCard({ status, trial, trialStartDate, trialEndDate }) {
   );
 }
 
-function PlanCard({ name, price, per, note, features, cta, onCta, highlight = false, badge }) {
+function PlanCard({ name, price, per, note, features, cta, onCta, highlight = false, badge, disabled = false }) {
   return (
     <Card
       padding="none"
@@ -359,7 +393,7 @@ function PlanCard({ name, price, per, note, features, cta, onCta, highlight = fa
         </div>
         {note && <p className="mt-1 text-xs font-medium text-brand-500">{note}</p>}
 
-        <Button className="mt-5" fullWidth variant={highlight ? 'primary' : 'outline'} onClick={onCta}>
+        <Button className="mt-5" fullWidth variant={highlight ? 'primary' : 'outline'} onClick={onCta} disabled={disabled}>
           {cta}
         </Button>
 

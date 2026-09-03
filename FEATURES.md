@@ -1,16 +1,16 @@
 # Wallet App — Feature List
 
-A personal finance / wallet web app. React (Vite) frontend, Node/Express backend, single encrypted JSON data file (no real database yet).
+A personal finance / wallet web app. React (Vite) frontend, Node/Express backend, Supabase (Postgres + Supabase Auth) for data and authentication. A parallel React Native mobile app shares the same backend.
 
 ## 1. Authentication & Account
 - Email/password signup and login
 - Google Sign-In (OAuth)
-- Session-token based auth (bearer token), logout
+- Supabase Auth (JWT bearer token) — signup via email OTP, login, logout
 - Logged-in "who am I" profile fetch
 - PIN lock screen (set/change a PIN to lock the app on this device)
 - Automatic sign-out after a period of inactivity (idle timer, configurable)
-- Two-factor authentication toggle (UI stub, not enforced yet)
-- Biometric unlock toggle (UI stub, WebAuthn planned)
+- Two-factor authentication (email OTP) — enforced backend step-up on new devices (web + mobile)
+- Biometric unlock (mobile app only)
 - Password & sessions panel in Settings
 
 ## 2. Dashboard
@@ -49,8 +49,8 @@ A personal finance / wallet web app. React (Vite) frontend, Node/Express backend
 
 ## 6. Bills
 - Recurring bill tracking with due dates
-- "Run" a bill (post it as a transaction)
-- Automatic bill posting on schedule (server-side)
+- "Mark as paid" posts the bill as a transaction (explicit human confirmation — no automatic posting) and rolls the due date forward
+- Per-payment history (bill_payments)
 - Bill reminder notifications
 
 ## 7. Goals
@@ -97,18 +97,21 @@ A personal finance / wallet web app. React (Vite) frontend, Node/Express backend
 - Help panel
 
 ## 13. Security (backend)
-- AES-256-GCM encryption of the data file at rest
-- Scrypt password hashing
-- Random bearer session tokens
+- Data in Supabase Postgres — encrypted at rest (Supabase), TLS in transit; RLS on every table; service-role key server-only
+- Supabase Auth for passwords/sessions/JWT/OAuth; backend verifies the JWT and applies its own ownership checks (`ownsAccount` + per-`user_id` query scoping)
+- Email-OTP 2FA step-up (HMAC-hashed codes, constant-time compare), per-device session list + revoke, force-logout, suspension — all backend-enforced
 - Ownership checks on every resource (users only access their own data)
-- Rate limiting (auth endpoints stricter than general API)
-- CORS allowlist, secure HTTP headers (helmet)
-- Server-side input validation
+- Rate limiting (blanket `/api` limiter + stricter per-route limiters on 2FA and admin sensitive actions)
+- CORS allowlist (refuses to boot open in production), secure HTTP headers + CSP (helmet)
+- Server-side input validation + length/control-char/magnitude bounds on every entity route
 - Global error handler that never leaks stack traces
-- Security event logging (auth failures, invalid tokens, rate-limit hits)
+- Security event logging (auth failures, invalid tokens, webhook signature failures) — console-based; wire to a real sink before scaling past one instance
+- Signature-verified, idempotent recurring-billing webhooks (Stripe / Razorpay)
 
 ## Known limitations (worth disclosing)
-- Backend storage is a single encrypted JSON file loaded fully into memory (no real database) — fine for a demo/single-user scale, not yet built for high concurrent traffic.
-- Two-factor authentication and biometric unlock are UI toggles only; not enforced by the backend yet.
-- Notification "delivery" (email/push) preferences exist but aren't wired to an actual email/push service yet.
+- `requireAuth` loads the user's full data bundle on every authenticated request — fine at current scale, needs pagination/narrower loads for a very large per-user dataset.
+- `GET /api/transactions` filtering and the Transactions/Calendar UI are not paginated/virtualized yet.
+- Notification "delivery" (email/push) preferences exist but delivery isn't wired to an email/push service yet (in-app notifications work).
 - Security/audit logging is console-based, not shipped to a real log sink.
+- Web subscription checkout supports Razorpay hosted checkout; Stripe card entry on web (Elements) is still completed via the mobile app.
+- `backend/crypto.js` (AES-256-GCM) is retained for possible future field-level encryption; it is not on any live path today.

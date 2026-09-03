@@ -166,6 +166,7 @@ export default function Accounts() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [actionError, setActionError] = useState('');
   const [showCreatePrompt] = useState(() => peekCreateAccountPrompt());
   const [settingPrimaryId, setSettingPrimaryId] = useState(null);
 
@@ -190,13 +191,19 @@ export default function Accounts() {
   }, []);
 
   async function handleDelete(id) {
+    setActionError('');
     try {
       await accountsApi.remove(id);
       setConfirmDelete(null);
       load();
       notifyAccountsChanged();
     } catch (err) {
-      alert(err.message || 'Could not delete this account.');
+      setConfirmDelete(null);
+      setActionError(
+        err.status === 409
+          ? 'This account is used by transactions, bills or goals and can’t be deleted.'
+          : err.message || 'Could not delete this account.'
+      );
     }
   }
 
@@ -205,13 +212,14 @@ export default function Accounts() {
   // primary here unsets whichever account held it before, same one-primary
   // invariant the Add/Edit modal and backend both enforce.
   async function handleSetPrimary(id) {
+    setActionError('');
     setSettingPrimaryId(id);
     try {
       await accountsApi.update(id, { isPrimary: true });
       await load();
       notifyAccountsChanged();
     } catch (err) {
-      alert(err.message || 'Could not set this account as primary.');
+      setActionError(err.message || 'Could not set this account as primary.');
     } finally {
       setSettingPrimaryId(null);
     }
@@ -230,6 +238,9 @@ export default function Accounts() {
 
   return (
     <div className="space-y-6">
+      {actionError && (
+        <p className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-500">{actionError}</p>
+      )}
       {showCreatePrompt && accounts.length === 0 && (
         <Alert tone="info" title="Let's set up your first account">
           Add a bank account, cash, wallet, or credit card to start tracking your money.
@@ -260,7 +271,7 @@ export default function Accounts() {
                 <span className="flex h-11 w-11 items-center justify-center rounded-xl" style={{ background: `${a.color}22`, color: a.color }}>
                   <DynamicIcon name={a.icon} size={20} />
                 </span>
-                <div className="flex gap-1 opacity-0 transition group-hover:opacity-100">
+                <div className="flex gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                   <Link to={`/app/accounts/${a.id}`} title="View details" className="rounded-lg p-1.5 text-muted hover:bg-tint/[0.06] hover:text-fg">
                     <Eye size={14} />
                   </Link>
