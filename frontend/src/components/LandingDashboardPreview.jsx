@@ -41,15 +41,24 @@ function TrendTooltip({ active, payload, label }) {
   );
 }
 
-export function LandingDashboardPreview() {
+// `header` renders the faux window chrome (traffic-light dots + label). Pass
+// `header={false}` when the preview is already wrapped in a chrome frame
+// (e.g. the marketing BrowserFrame) so the dots don't stack twice.
+export function LandingDashboardPreview({ header = true }) {
+  const Wrapper = header ? Card : 'div';
+  const wrapperProps = header
+    ? { strong: true, padding: 'none', className: 'overflow-hidden' }
+    : { className: 'bg-surface' };
   return (
-    <Card strong padding="none" className="overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-line px-5 py-3">
-        <span className="h-2.5 w-2.5 rounded-full bg-danger" />
-        <span className="h-2.5 w-2.5 rounded-full bg-warning" />
-        <span className="h-2.5 w-2.5 rounded-full bg-success" />
-        <span className="ml-3 rounded-md bg-tint/[0.05] px-3 py-1 text-xs text-subtle">app.vault.finance/dashboard</span>
-      </div>
+    <Wrapper {...wrapperProps}>
+      {header ? (
+        <div className="flex items-center gap-2 border-b border-line px-5 py-3">
+          <span className="h-2.5 w-2.5 rounded-full bg-danger" />
+          <span className="h-2.5 w-2.5 rounded-full bg-warning" />
+          <span className="h-2.5 w-2.5 rounded-full bg-success" />
+          <span className="ml-3 rounded-md bg-tint/[0.05] px-3 py-1 text-xs text-subtle">Vault · Dashboard preview</span>
+        </div>
+      ) : null}
 
       <div className="grid gap-5 p-5 lg:grid-cols-[1.3fr_1fr] lg:p-6">
         <div className="space-y-5">
@@ -167,7 +176,7 @@ export function LandingDashboardPreview() {
           </div>
         </div>
       </div>
-    </Card>
+    </Wrapper>
   );
 }
 
