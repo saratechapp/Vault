@@ -1,4 +1,4 @@
-import { readPrefs, getCurrencyMeta } from './preferences.js';
+import { readPrefs, formatCurrency } from './preferences.js';
 import { supabase } from './supabaseClient.js';
 import { touchActivity, clearActivity, isIdleExpired, markSessionExpired, markAccountSuspended } from './idleSession.js';
 import { getWebSessionId } from './deviceSession.js';
@@ -249,13 +249,7 @@ export const dataApi = {
 };
 
 // ---- formatting ----
-export function formatCurrency(n, symbol) {
-  const prefs = readPrefs();
-  const meta = getCurrencyMeta(prefs.currency);
-  const sym = symbol || meta.symbol;
-  const val = Math.abs(Number(n) || 0);
-  return `${n < 0 ? '-' : ''}${sym}${val.toLocaleString(meta.locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+export { formatCurrency };
 
 export function formatDate(isoStr) {
   if (!isoStr) return '—';

@@ -225,3 +225,15 @@ export function writePrefs(next) {
 export function getCurrencyMeta(code) {
   return CURRENCIES.find((c) => c.code === code) || CURRENCIES.find((c) => c.code === 'USD');
 }
+
+// Canonical money formatter — reads the current (auto-detected or
+// user-chosen) currency from prefs so every amount in the app, including the
+// public marketing pages, renders in the visitor's own currency rather than
+// a hardcoded one. Re-exported from api.js for existing call sites.
+export function formatCurrency(n, symbol) {
+  const prefs = readPrefs();
+  const meta = getCurrencyMeta(prefs.currency);
+  const sym = symbol || meta.symbol;
+  const val = Math.abs(Number(n) || 0);
+  return `${n < 0 ? '-' : ''}${sym}${val.toLocaleString(meta.locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}

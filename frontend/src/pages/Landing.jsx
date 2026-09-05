@@ -3,16 +3,17 @@ import { Link } from 'react-router-dom';
 import { motion, useScroll, useTransform, useReducedMotion } from 'framer-motion';
 import {
   ArrowRight, Check, ShieldCheck, Lock, Zap, Sparkles, ScanLine,
-  LineChart, Target, Globe2, TrendingUp, CalendarDays,
+  LineChart, Target, Globe2, TrendingUp, CalendarDays, ChevronDown,
   Wallet, KeyRound, ServerCog, EyeOff, DownloadCloud, Smartphone, Monitor,
 } from 'lucide-react';
 import { ThemeToggle } from '../components/ThemeToggle.jsx';
-import { Button, Card, ProgressBar, SectionHeader, Accordion, Chip } from '../components/ui/index.js';
+import { Button, Card, ProgressBar, SectionHeader, Accordion, Chip, Skeleton } from '../components/ui/index.js';
 import { LandingDashboardPreview } from '../components/LandingDashboardPreview.jsx';
 import { FadeIn, SlideUp, ScrollReveal, Stagger, StaggerItem } from '../components/motion/index.js';
 import {
   PhoneFrame, BrowserFrame, CountUp, SpendingHeatmap, AiScanShowcase, MobileAppPreview,
 } from '../components/marketing/index.js';
+import { LandingCurrencyProvider, useCurrency } from '../context/LandingCurrencyContext.jsx';
 
 const SEO = {
   title: 'Vault Finance — Smarter Personal Finance Management',
@@ -54,6 +55,30 @@ function useLandingChrome() {
 
 /* ---------------------------------------------------------------- Nav --- */
 
+// Only rendered once more than one currency is actually priced (the Super
+// Admin has to enable a second one first) — a selector with a single option
+// is just clutter, and it appears automatically the moment a new currency is
+// configured, with no code change here.
+function CurrencySelector() {
+  const { loading, currencyCode, currencies, setCurrency } = useCurrency();
+  if (loading || currencies.length <= 1) return null;
+  return (
+    <div className="relative">
+      <select
+        aria-label="Currency"
+        value={currencyCode}
+        onChange={(e) => setCurrency(e.target.value)}
+        className="h-10 cursor-pointer appearance-none rounded-xl border-none bg-tint/[0.05] pl-3 pr-7 text-sm font-medium text-muted transition hover:bg-tint/[0.08] hover:text-fg focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+      >
+        {currencies.map((c) => (
+          <option key={c.code} value={c.code}>{c.symbol === c.code ? c.code : `${c.code} ${c.symbol}`}</option>
+        ))}
+      </select>
+      <ChevronDown size={12} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-subtle" />
+    </div>
+  );
+}
+
 function Nav() {
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-app/80 backdrop-blur-xl">
@@ -70,6 +95,7 @@ function Nav() {
           <a href="#faq" className="link-underline hover:text-fg">FAQ</a>
         </nav>
         <div className="flex items-center gap-2 sm:gap-3">
+          <CurrencySelector />
           <ThemeToggle />
           <Button as={Link} to="/login" variant="ghost" size="sm" className="hidden sm:inline-flex">Sign in</Button>
           <Button as={Link} to="/signup" size="sm" rightIcon={<ArrowRight size={15} />}>Get Started Free</Button>
@@ -85,6 +111,7 @@ function Hero() {
   const reduce = useReducedMotion();
   const { scrollY } = useScroll();
   const phoneY = useTransform(scrollY, [0, 700], [0, reduce ? 0 : -48]);
+  const { trial, enforcementEnabled } = useCurrency();
 
   return (
     <section className="relative overflow-hidden px-4 pb-12 pt-14 sm:px-6 sm:pb-20 sm:pt-20">
@@ -121,7 +148,12 @@ function Hero() {
           <div className="mt-6 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-subtle">
             <span className="flex items-center gap-1.5"><ShieldCheck size={15} className="text-success" /> Encrypted in transit &amp; at rest</span>
             <span className="flex items-center gap-1.5"><Lock size={15} className="text-success" /> Your data stays yours</span>
-            <span className="flex items-center gap-1.5"><Zap size={15} className="text-success" /> Free while in early access</span>
+            <span className="flex items-center gap-1.5">
+              <Zap size={15} className="text-success" />
+              {enforcementEnabled && trial.enabled
+                ? `Free ${trial.durationMonths}-month trial, cancel anytime`
+                : 'Free while in early access'}
+            </span>
           </div>
         </SlideUp>
       </div>
@@ -545,17 +577,47 @@ function Principles() {
 
 /* ------------------------------------------------------- Pricing / CTA --- */
 
+// Reflects whatever the Super Admin has actually configured (pricing +
+// trial + enforcement) — no copy here is a fixed claim about the business,
+// so it stays correct automatically whichever of those the admin flips.
 function Pricing() {
+  const { loading, selected, trial, enforcementEnabled } = useCurrency();
+
   return (
     <section className="px-4 pb-8 sm:px-6">
       <ScrollReveal className="mx-auto max-w-[1400px]">
         <Card strong padding="lg" className="flex flex-col items-center gap-3 border-brand-500/25 bg-gradient-to-br from-brand-500/[0.08] to-transparent py-12 text-center">
           <span className="chip border-brand-500/30 bg-brand-500/10 text-xs font-semibold text-brand-500">Pricing</span>
-          <h2 className="font-display text-2xl font-bold text-fg sm:text-3xl">Start free. Upgrade when you need more.</h2>
-          <p className="max-w-xl text-muted">
-            Every feature is available for free while Vault is in early access. A paid plan is planned — if it launches,
-            you'll be told first, and existing free access is unaffected.
-          </p>
+
+          {loading || !selected ? (
+            <>
+              <Skeleton className="h-8 w-72 max-w-full" />
+              <Skeleton className="mt-1 h-5 w-96 max-w-full" />
+            </>
+          ) : enforcementEnabled ? (
+            <>
+              <h2 className="font-display text-2xl font-bold text-fg sm:text-3xl">
+                {selected.monthlyFormatted}/month, or {selected.yearlyFormatted}/year
+              </h2>
+              <p className="max-w-xl text-muted">
+                {trial.enabled && `Start with a free ${trial.durationMonths}-month trial, then `}
+                {selected.monthly > 0 && selected.yearlySavingsPct > 0
+                  ? `save ${selected.yearlySavingsPct}% by paying yearly. `
+                  : ''}
+                Cancel anytime — no hidden fees.
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="font-display text-2xl font-bold text-fg sm:text-3xl">Start free. Upgrade when you need more.</h2>
+              <p className="max-w-xl text-muted">
+                Every feature is available for free while Vault is in early access
+                {selected.monthly > 0 && ` — priced at ${selected.monthlyFormatted}/month once billing goes live`}.
+                You'll be told first, and existing free access is unaffected.
+              </p>
+            </>
+          )}
+
           <Button as={Link} to="/signup" size="lg" className="mt-2" rightIcon={<ArrowRight size={16} />}>
             View plans &amp; get started
           </Button>
@@ -571,10 +633,19 @@ const FAQS = [
   { question: 'Is Vault really available on both web and mobile?', answer: 'Yes. The web app and the mobile app share one account and the same backend, so your data is identical wherever you sign in.' },
   { question: 'Can I import my existing transactions?', answer: 'Yes, via CSV import with column mapping and a preview before anything is committed.' },
   { question: 'Does it support multiple currencies?', answer: 'Yes — dozens of currencies with live daily FX conversion against your base currency.' },
-  { question: 'How much does Vault cost?', answer: 'Every feature is free today. A paid plan is planned; if it launches, existing free access is unaffected and you will always be told before anything changes.' },
 ];
 
 function FAQ() {
+  const { loading, selected, trial, enforcementEnabled } = useCurrency();
+
+  const costAnswer = loading || !selected
+    ? 'Pricing varies by region — see the Pricing section above for your currency.'
+    : enforcementEnabled
+      ? `${selected.monthlyFormatted}/month or ${selected.yearlyFormatted}/year${trial.enabled ? `, starting with a free ${trial.durationMonths}-month trial` : ''}. Cancel anytime.`
+      : `Every feature is free today. A paid plan is planned — it would be ${selected.monthlyFormatted}/month at today's pricing — and existing free access is unaffected.`;
+
+  const faqs = [...FAQS, { question: 'How much does Vault cost?', answer: costAnswer }];
+
   return (
     <section id="faq" className="px-4 py-20 sm:px-6 sm:py-24">
       <div className="mx-auto max-w-3xl">
@@ -582,7 +653,7 @@ function FAQ() {
           <SectionHeader align="center" eyebrow="FAQ" title="Questions, answered" />
         </ScrollReveal>
         <ScrollReveal delay={0.1} className="mt-10">
-          <Accordion items={FAQS} />
+          <Accordion items={faqs} />
         </ScrollReveal>
       </div>
     </section>
@@ -696,22 +767,24 @@ function Footer() {
 export default function Landing() {
   useLandingChrome();
   return (
-    <FadeIn as="div">
-      <Nav />
-      <Hero />
-      <ValueStrip />
-      <WhyVault />
-      <AiSection />
-      <HeatmapSection />
-      <Platforms />
-      <HowItWorks />
-      <Security />
-      <DashboardDeep />
-      <Principles />
-      <Pricing />
-      <FAQ />
-      <FinalCTA />
-      <Footer />
-    </FadeIn>
+    <LandingCurrencyProvider>
+      <FadeIn as="div">
+        <Nav />
+        <Hero />
+        <ValueStrip />
+        <WhyVault />
+        <AiSection />
+        <HeatmapSection />
+        <Platforms />
+        <HowItWorks />
+        <Security />
+        <DashboardDeep />
+        <Principles />
+        <Pricing />
+        <FAQ />
+        <FinalCTA />
+        <Footer />
+      </FadeIn>
+    </LandingCurrencyProvider>
   );
 }

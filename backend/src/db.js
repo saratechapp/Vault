@@ -763,6 +763,7 @@ async function resolvePricingForUser(profile, { localeHint, ipCountry, settings 
       code: p.currency,
       symbol: currencyService.currencyMeta(p.currency).symbol,
       name: currencyService.currencyMeta(p.currency).name,
+      locale: currencyService.currencyMeta(p.currency).locale,
       monthly: p.monthlyPrice,
       yearly: p.yearlyPrice,
       monthlyFormatted: currencyService.formatMoney(p.monthlyPrice, p.currency),

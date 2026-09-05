@@ -3,20 +3,23 @@ import {
   Home, ArrowLeftRight, CalendarDays, PieChart, Sparkles, Plus,
   ArrowUpRight, ArrowDownRight, Utensils, ShoppingBag, Car, Wallet,
 } from 'lucide-react';
+import { useCurrency } from '../../context/LandingCurrencyContext.jsx';
 
 // A compact render of the mobile app's key screens, built from the same
 // design-system tokens as the web app so it stays visually in sync (no
 // screenshot to drift). `variant` picks which screen to show inside the
-// shared phone shell.
+// shared phone shell. Amounts render in the visitor's own detected currency
+// (LandingCurrencyContext), same as the desktop preview — this is a
+// marketing mockup, not the signed-in app's own data.
 const TREND = [
   { v: 18 }, { v: 24 }, { v: 20 }, { v: 30 }, { v: 26 }, { v: 34 }, { v: 31 },
 ];
 
 const TX = [
-  { icon: Utensils, name: 'Blue Tokai', cat: 'Food & Drink', amt: '-₹420', tone: 'text-fg' },
-  { icon: Wallet, name: 'Salary — June', cat: 'Income', amt: '+₹94,000', tone: 'text-success' },
-  { icon: ShoppingBag, name: 'Amazon', cat: 'Shopping', amt: '-₹2,310', tone: 'text-fg' },
-  { icon: Car, name: 'Uber', cat: 'Transport', amt: '-₹268', tone: 'text-fg' },
+  { icon: Utensils, name: 'Blue Tokai', cat: 'Food & Drink', amount: -420 },
+  { icon: Wallet, name: 'Salary — June', cat: 'Income', amount: 94000 },
+  { icon: ShoppingBag, name: 'Amazon', cat: 'Shopping', amount: -2310 },
+  { icon: Car, name: 'Uber', cat: 'Transport', amount: -268 },
 ];
 
 const TABS = [
@@ -56,11 +59,12 @@ function Shell({ title, active, children }) {
 }
 
 function DashboardScreen() {
+  const { formatCurrency } = useCurrency();
   return (
     <Shell title="Dashboard" active="dashboard">
       <div className="rounded-xl border border-line bg-surface p-3.5 dark:bg-surface-2">
         <p className="text-[10px] uppercase tracking-wide text-subtle">Total balance</p>
-        <p className="mt-1 font-display text-xl font-bold">₹3,24,860</p>
+        <p className="mt-1 font-display text-xl font-bold">{formatCurrency(324860)}</p>
         <p className="mt-0.5 flex items-center gap-0.5 text-[11px] font-semibold text-success">
           <ArrowUpRight size={11} /> 6.4% this month
         </p>
@@ -81,24 +85,25 @@ function DashboardScreen() {
       <div className="mt-3 grid grid-cols-2 gap-2">
         <div className="rounded-lg border border-line bg-surface p-2.5 dark:bg-surface-2">
           <p className="text-[10px] text-subtle">Spent</p>
-          <p className="text-sm font-bold">₹41,200</p>
+          <p className="text-sm font-bold">{formatCurrency(41200)}</p>
         </div>
         <div className="rounded-lg border border-line bg-surface p-2.5 dark:bg-surface-2">
           <p className="text-[10px] text-subtle">Saved</p>
-          <p className="text-sm font-bold text-success">₹52,800</p>
+          <p className="text-sm font-bold text-success">{formatCurrency(52800)}</p>
         </div>
       </div>
       <div className="mt-3 rounded-xl border border-brand-500/25 bg-brand-500/[0.06] p-3">
         <p className="flex items-center gap-1.5 text-[11px] font-semibold text-brand-500">
           <Sparkles size={12} /> AI insight
         </p>
-        <p className="mt-1 text-[11px] text-muted">Dining is up 23% — a ₹6k cap keeps June on pace.</p>
+        <p className="mt-1 text-[11px] text-muted">Dining is up 23% — a {formatCurrency(6000)} cap keeps June on pace.</p>
       </div>
     </Shell>
   );
 }
 
 function TransactionsScreen() {
+  const { formatCurrency } = useCurrency();
   return (
     <Shell title="Transactions" active="transactions">
       <div className="space-y-2">
@@ -111,7 +116,9 @@ function TransactionsScreen() {
               <p className="truncate text-[11px] font-medium">{t.name}</p>
               <p className="truncate text-[10px] text-subtle">{t.cat}</p>
             </div>
-            <span className={`shrink-0 text-[11px] font-semibold tabular-nums ${t.tone}`}>{t.amt}</span>
+            <span className={`shrink-0 text-[11px] font-semibold tabular-nums ${t.amount > 0 ? 'text-success' : 'text-fg'}`}>
+              {t.amount > 0 ? '+' : ''}{formatCurrency(t.amount)}
+            </span>
           </div>
         ))}
       </div>
@@ -123,6 +130,7 @@ function TransactionsScreen() {
 }
 
 function CalendarScreen() {
+  const { formatCurrency } = useCurrency();
   const cells = Array.from({ length: 35 });
   return (
     <Shell title="Calendar" active="calendar">
@@ -140,7 +148,7 @@ function CalendarScreen() {
       <div className="mt-3 rounded-lg border border-line bg-surface p-3 dark:bg-surface-2">
         <p className="text-[10px] text-subtle">Sep 3 · net</p>
         <p className="flex items-center gap-0.5 text-sm font-bold text-danger">
-          <ArrowDownRight size={12} /> -₹1,173
+          <ArrowDownRight size={12} /> {formatCurrency(-1173)}
         </p>
       </div>
       <div className="mt-2 flex items-center gap-1.5 text-[9px] text-subtle">

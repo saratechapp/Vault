@@ -33,6 +33,13 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 // normal API key.
 const ANTHROPIC_WORKSPACE_ID = process.env.ANTHROPIC_WORKSPACE_ID || '';
 
+// Gemini API key for the same POST /api/records/scan vision call — Gemini
+// 2.5 Flash-Lite is the active scanner provider (services/geminiReceiptService.js);
+// ANTHROPIC_API_KEY above is kept only so services/receiptScanService.js can
+// be swapped back in without re-adding config. Used only there; never sent
+// to any client. Unset = the scan endpoint returns 502.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+
 // `version` is read from package.json (never hardcoded) — mobile's Settings
 // > About screen surfaces it as "API Version" alongside its own app version.
 const { version: API_VERSION } = require('../../package.json');
@@ -62,7 +69,7 @@ const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || CORS_ORIGINS[0] || 'http:/
 
 module.exports = {
   PORT, CORS_ORIGINS, TRUST_PROXY, isDevEnv, SUPABASE_HOST, API_VERSION,
-  ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID,
+  ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID, GEMINI_API_KEY,
   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET,
   SUBSCRIPTION_PROVIDER_MAP, APP_PUBLIC_URL,

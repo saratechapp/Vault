@@ -22,7 +22,12 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { requireFeature, assertUnderLimit } = require('../middleware/planGuards');
 const { securityLog } = require('../lib/securityLog');
 const { scanUpload } = require('../middleware/scanUpload');
-const { scanReceipts } = require('../services/receiptScanService');
+// Active scanner provider — Gemini 2.5 Flash-Lite (dramatically cheaper than
+// the Claude vision call in receiptScanService.js, same wire contract; see
+// services/geminiReceiptService.js for why). Swap this one require to roll
+// back to receiptScanService.js if needed — nothing else in this route cares
+// which provider is behind scanReceipts().
+const { scanReceipts } = require('../services/geminiReceiptService');
 const receiptScanQuota = require('../services/receiptScanQuota');
 const subscriptionBilling = require('../services/subscriptionBillingService');
 const { sendJSON, bumpCache } = require('../lib/httpCache');
@@ -257,6 +262,28 @@ router.get('/api/me', requireAuth, ah(async (req, res) => {
   // own separate tracking of "did I already verify this session".
   user.twoFactorVerified = !req.userData.twoFactorEnabled || !!req.currentSession?.twoFactorVerifiedAt;
   res.json({ user });
+}));
+
+// Public, unauthenticated pricing for the marketing site (`/`) — a visitor
+// has no profile yet, so this is the same location-aware resolution chain
+// as GET /api/subscription below minus the profile-based candidates
+// (billingCurrency / profileCurrency / profileCountry): just the CDN geo
+// header and the browser-locale fallback. Never FX-converts; only ever
+// returns currencies the Super Admin has actually priced, so the landing
+// page can't show a fabricated number. Covered by the blanket /api rate
+// limiter (see app.js) like every other route here.
+router.get('/api/public/pricing', ah(async (req, res) => {
+  const settings = await db.getSubscriptionSettings();
+  const pricing = await db.resolvePricingForUser(null, {
+    localeHint: req.query.locale,
+    ipCountry: countryFromHeaders(req),
+    settings,
+  });
+  res.json({
+    pricing,
+    trial: { enabled: settings.trialEnabled, durationMonths: settings.trialDurationMonths },
+    enforcementEnabled: settings.enforcementEnabled,
+  });
 }));
 
 // The current user's resolved subscription status + the location-aware
@@ -1794,7 +1821,7 @@ router.post('/api/ai/conversations/:id/messages', requireAuth, requireFeature('c
 // The mobile "Scan a bill or payment" flow posts 1–4 images here (a large
 // bill split across pages/photos); a vision-capable model reads them
 // TOGETHER as ONE transaction (see SCAN_ENDPOINT_CONTRACT.md and
-// services/receiptScanService.js). The API key
+// services/geminiReceiptService.js). The API key
 // stays server-side. scanUpload parses the multipart body into memory only —
 // images are never written to disk, never logged, and dropped as soon as the
 // response is sent.

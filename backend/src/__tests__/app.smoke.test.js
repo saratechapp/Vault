@@ -39,6 +39,15 @@ test('GET /api/health -> 200 ok', async () => {
   assert.strictEqual(JSON.parse(res.body).status, 'ok');
 });
 
+test('GET /api/public/pricing without auth -> 200 with a resolved currency', async () => {
+  const res = await get('/api/public/pricing?locale=en-US');
+  assert.strictEqual(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.strictEqual(typeof body.pricing.currency, 'string');
+  assert.ok(Array.isArray(body.pricing.currencies));
+  assert.strictEqual(typeof body.trial.enabled, 'boolean');
+});
+
 test('GET /api/me without auth -> 401', async () => {
   const res = await get('/api/me');
   assert.strictEqual(res.status, 401);
